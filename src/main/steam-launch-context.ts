@@ -42,9 +42,36 @@ export function steamHandoffRequest(data: unknown): SteamHandoff | undefined {
   return { environment, lease: { socket: value.lease.socket, token: value.lease.token } };
 }
 
-/** Request-local copy, including clearing stale Steam filters absent in the sender. */
+// Driver and DXVK cache locations the Steam client puts in a launched
+// process. Steam does not mark them as its own, so a value that reached the
+// main process from Steam cannot be told apart from one the user exported
+// before starting Steam. Only these names are dropped; Vulkan loader
+// configuration such as VK_LAYER_PATH or VK_INSTANCE_LAYERS stays untouched.
+const steamCacheNames = ['MESA_SHADER_CACHE_DIR', 'MESA_SHADER_CACHE_MAX_SIZE', 'MESA_DISK_CACHE_SINGLE_FILE',
+  'MESA_DISK_CACHE_READ_ONLY_FOZ_DBS', 'MESA_GLSL_CACHE_DIR', 'MESA_GLSL_CACHE_MAX_SIZE',
+  '__GL_SHADER_DISK_CACHE_PATH', '__GL_SHADER_DISK_CACHE_APP_NAME', '__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME',
+  '__GL_SHADER_DISK_CACHE_SKIP_CLEANUP', 'DXVK_STATE_CACHE_PATH',
+  // Fossilize's own switch. Removing it only stops the layer being enabled
+  // implicitly; an explicit loader setting can still activate it.
+  'ENABLE_VK_LAYER_VALVE_steam_fossilize_1'] as const;
+
+/** Whether the launcher process itself was started by Steam (not a later request). */
+export function steamPrimaryEnvironment(env: NodeJS.ProcessEnv): boolean {
+  return captureSteamLaunchEnvironment(env) !== undefined;
+}
+
+const steamCacheVariable = (name: string): boolean => (steamCacheNames as readonly string[]).includes(name)
+  || name.startsWith('STEAM_FOSSILIZE_');
+
+/**
+ * Copy of the inherited environment for one launch. A main process started by
+ * Steam drops Steam's cache variables so the managed per-prefix cache applies;
+ * a normally started process keeps every value, including a later Steam
+ * shortcut request. The caller's environment object is never modified.
+ */
 export function steamGameEnvironment(base: NodeJS.ProcessEnv, context?: SteamLaunchEnvironment): NodeJS.ProcessEnv {
   const result = { ...base };
+  if (steamPrimaryEnvironment(base)) for (const name of Object.keys(result)) if (steamCacheVariable(name)) delete result[name];
   if (context) for (const name of names) {
     delete result[name];
     if (context[name] !== undefined) result[name] = context[name];

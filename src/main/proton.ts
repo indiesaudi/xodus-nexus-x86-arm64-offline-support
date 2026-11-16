@@ -542,7 +542,7 @@ export async function prepareProtonRunner(
   compatibilityDataPath: string,
   steamRoot: string,
   shaderCacheLimitGiB = DEFAULT_SHADER_CACHE_GIB,
-  options: { installPath?: string; home?: string } = {},
+  options: { installPath?: string; home?: string; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<ProtonRunner | undefined> {
   const cacheLimits = shaderCacheLimits(shaderCacheLimitGiB);
   // An arm64 runtime keeps its own loader, prefix and ARM64X modules; Proton's
@@ -564,8 +564,11 @@ export async function prepareProtonRunner(
   let missing = await missingPrefixFiles(compatibilityDataPath, layout);
   if (missing.length > 0) {
     const initialized = await run(proton, ['run', 'cmd', '/c', 'exit'], {
+      // The launch environment is a Steam-sanitized copy of the main process
+      // environment, so prefix creation must not reintroduce Steam's cache
+      // variables. Play always passes it; the main process copy is the default.
       env: {
-        ...process.env,
+        ...(options.environment ?? process.env),
         STEAM_COMPAT_DATA_PATH: compatibilityDataPath,
         STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
         SteamAppId: '0',
