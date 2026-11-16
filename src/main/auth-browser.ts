@@ -119,8 +119,16 @@ export function createBrowserAuthViewFactory(browser: AuthBrowser | string, envi
       if (!browserBindingAllowed(context, mainFrame, frame)) return;
       const active = frame!;
       // Recheck this realm after the async command, not a new page's default realm.
-      const origin = await call('Runtime.evaluate', { expression: 'location.origin', contextId: p.executionContextId, returnByValue: true });
-      if (frame !== active || !trustedAuthUrl(origin.result?.value ?? '') || origin.result.value !== context.origin) return;
+      // Navigation can destroy the realm mid-command; that rejection belongs to
+      // the retired page, never to the session that replaced it.
+      let origin;
+      try {
+        origin = await call('Runtime.evaluate', { expression: 'location.origin', contextId: p.executionContextId, returnByValue: true });
+      } catch (error) {
+        if (disposed || frame !== active || contexts.get(p.executionContextId) !== context) return;
+        throw error;
+      }
+      if (disposed || frame !== active || contexts.get(p.executionContextId) !== context || !trustedAuthUrl(origin.result?.value ?? '') || origin.result.value !== context.origin) return;
       send(active.session, p.payload);
     }
     async function initialize(): Promise<void> {
@@ -162,10 +170,17 @@ export function createBrowserAuthViewFactory(browser: AuthBrowser | string, envi
         const active = frame;
         const realm = [...contexts.values()].find(value => browserBindingAllowed(value, mainFrame, active));
         if (!realm) return;
-        const origin = await evaluate('location.origin', realm.id);
-        if (frame !== active || contexts.get(realm.id) !== realm || !trustedAuthUrl(origin ?? '') || origin !== realm.origin) return;
-        const message = JSON.stringify({ type: 'callback', value: { name: 'CloudExperienceHost.getContext', args: ['CloudExperienceHost', 'TokenBroker', 'TokenBroker', '{"PrivatePropertyBag":1,"PasswordlessConnect":1,"PreferAssociate":1,"ChromelessUI":0}'], context } });
-        await evaluate(`globalThis["CloudExperienceHost.Bridge.dispatchMessage"](${JSON.stringify(message)})`, realm.id);
+        // A navigation that retires this realm mid-command is not a failure of
+        // the session; a rejection from the still-current realm is.
+        try {
+          const origin = await evaluate('location.origin', realm.id);
+          if (frame !== active || contexts.get(realm.id) !== realm || !trustedAuthUrl(origin ?? '') || origin !== realm.origin) return;
+          const message = JSON.stringify({ type: 'callback', value: { name: 'CloudExperienceHost.getContext', args: ['CloudExperienceHost', 'TokenBroker', 'TokenBroker', '{"PrivatePropertyBag":1,"PasswordlessConnect":1,"PreferAssociate":1,"ChromelessUI":0}'], context } });
+          await evaluate(`globalThis["CloudExperienceHost.Bridge.dispatchMessage"](${JSON.stringify(message)})`, realm.id);
+        } catch (error) {
+          if (disposed || frame !== active || contexts.get(realm.id) !== realm) return;
+          throw error;
+        }
       },
       async dispose() {
         if (disposed) return; disposed = true; frame = undefined;
