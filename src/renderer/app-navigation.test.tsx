@@ -235,6 +235,23 @@ it('uses Y for Search and the keyboard, including when closing Social', async ()
   expect(window.launcher.showTouchKeyboard).toHaveBeenCalledTimes(2);
 });
 
+it('keeps submitted Store results when B closes a keyboard that stayed open after Enter', async () => {
+  vi.mocked(window.launcher.showTouchKeyboard).mockResolvedValue(true);
+  await press(3);
+  await typeSearch('test');
+  await act(async () => {
+    get('.search-box input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await act(async () => { harness.step(); });
+  expect(document.querySelector('.store-page')).not.toBeNull();
+  await press(13); // The Steam keyboard is still open, so this must not move the launcher.
+  expect(document.activeElement).toBe(get('.search-box input'));
+  await press(1); // Closing the keyboard must not also invoke App's Back to Home.
+  expect(document.querySelector('.store-page')).not.toBeNull();
+  expect(document.querySelector('.home-page')).toBeNull();
+  expect((get('.search-box input') as HTMLInputElement).value).toBe('test');
+});
+
 it('starts Home at Play and lets Down leave Search for the main page', async () => {
   expect(document.activeElement).toBe(get('[data-gamepad-home-primary]'));
   await press(3); expect(document.activeElement).toBe(get('.search-box input'));

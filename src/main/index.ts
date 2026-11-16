@@ -52,7 +52,7 @@ import {catalogDetailMarket, publicStoreMarket} from './public-store-market.js';
 import {assertStoreOfferAccess} from './catalog-access.js';
 import { cloudSaveRuntime, gameInviteRuntime, offlineIdentityRuntime, selectedWinePath, startXodusService, storeContentRuntime, storeDiscoveryRuntime, unbridgedCloudSaveRuntime, type XodusServiceSession } from './xodus-service.js';
 import { GameLogReducer, gameLoggingEnvironment, gameWindowEnvironment } from './game-log.js';
-import { downloadVerifiedVcRedist, installedVcRuntimeVersion, VC_REDIST_VERSION, versionAtLeast } from './vc-runtime.js';
+import { downloadVerifiedVcRedist, installedVcRuntimeVersion, VC_REDIST_VERSION, vcOperationEnvironment, versionAtLeast } from './vc-runtime.js';
 import { assertGameRemovalAvailable, validateGameDeleteTarget } from './game-removal.js';
 import { deleteGameDirectory } from './game-delete.js';
 import { spawnGameProcess, type GameProcess } from './game-process.js';
@@ -1418,7 +1418,7 @@ async function prepareGameLaunch(id: string, steam?: SteamGameContext): Promise<
     const legacyPrefixRoot = runtimeContext.legacyPrefixRoot;
     const compatibilityDataPath = runtimeContext.compatibilityDataPath;
     const steamRoot = path.join(app.getPath('home'), '.steam', 'root');
-    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, store.settings.shaderCacheLimitGiB, { installPath: game.path });
+    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, store.settings.shaderCacheLimitGiB, { installPath: game.path, home: app.getPath('home'), environment: launchEnvironment });
     const wineCommand = protonRunner?.command ?? wine;
     // Play goes through the runtime's Proton session when one is available, so
     // the runtime's own launch options (for example PROTON_USE_OPTISCALER) are
@@ -1660,7 +1660,11 @@ async function installGameVcRuntime(id: string): Promise<void> {
   preparationControllers.set(operationId, controller);
   try {
     const compatibilityDataPath = runtimeContext.compatibilityDataPath;
-    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, path.join(app.getPath('home'), '.steam', 'root'), store.settings.shaderCacheLimitGiB);
+    // This operation has no incoming game launch context: one sanitized copy of
+    // the primary process environment feeds both prefix initialization and the
+    // installer. The process environment itself is not modified.
+    const { environment, installerEnvironment } = vcOperationEnvironment();
+    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, path.join(app.getPath('home'), '.steam', 'root'), store.settings.shaderCacheLimitGiB, { environment });
     if (!protonRunner) throw new Error('VC++ installation requires a full Proton runtime, not a standalone Wine binary.');
     const prefix = path.join(compatibilityDataPath, 'pfx');
     const previous = await installedVcRuntimeVersion(prefix);
@@ -1682,7 +1686,7 @@ async function installGameVcRuntime(id: string): Promise<void> {
       preparationControllers.delete(operationId);
       addLine('Microsoft installer SHA-256 verified. Installing into this game’s Proton prefix…');
       const tracked = spawnTracked(protonRunner.command, [installer, '/install', '/quiet', '/norestart'], {
-        env: gameLoggingEnvironment({ ...process.env }),
+        env: installerEnvironment,
         onLine: addLine,
         maxOutput: 1_000_000,
       });

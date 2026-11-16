@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep controller input on the Steam keyboard without navigating the launcher underneath it, and preserve search results when the keyboard is dismissed.
+- Start the account service with long launcher profile paths without exceeding the Unix socket path limit.
+- Update Electron to 45.3.0, including the mitigation for compromised eMudhra intermediate certificates.
 - Stop background update checks, keep game actions responsive, and queue updates while another game downloads.
 
 - Optionally keep Nexus and downloads running in the desktop system tray, with shortcuts to Home, Library, Store and Settings.
