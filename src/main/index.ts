@@ -1418,7 +1418,7 @@ async function prepareGameLaunch(id: string, steam?: SteamGameContext): Promise<
     const legacyPrefixRoot = runtimeContext.legacyPrefixRoot;
     const compatibilityDataPath = runtimeContext.compatibilityDataPath;
     const steamRoot = path.join(app.getPath('home'), '.steam', 'root');
-    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, store.settings.shaderCacheLimitGiB, { installPath: game.path });
+    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, store.settings.shaderCacheLimitGiB, { installPath: game.path, home: app.getPath('home') });
     const wineCommand = protonRunner?.command ?? wine;
     // Play goes through the runtime's Proton session when one is available, so
     // the runtime's own launch options (for example PROTON_USE_OPTISCALER) are

@@ -548,6 +548,82 @@ exit 0
     }
   });
 
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['custom', '/explicit/be'],
+  ] as const)('uses the installed BattlEye bridge only when PROTON_BATTLEYE_RUNTIME is unset (%s)', async (_label, explicit) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'xodus-nexus-be-runner-'));
+    created.push(root);
+    const files = path.join(root, 'runtime/files');
+    const wine = path.join(files, 'bin/wine');
+    const steam = path.join(root, "Steam's library");
+    const battleye = path.join(steam, 'steamapps/common/Proton BattlEye Runtime');
+    const compat = path.join(root, 'compat');
+    const system32 = path.join(compat, 'pfx/drive_c/windows/system32');
+    await mkdir(path.dirname(wine), { recursive: true });
+    await mkdir(path.join(files, 'share/default_pfx'), { recursive: true });
+    await mkdir(system32, { recursive: true });
+    for (const dll of ['libvkd3d-utils-1.dll', 'dxgi.dll', 'd3d12.dll']) await writeFile(path.join(system32, dll), 'ready');
+    // Both managed commands run the same environment block, so both are checked.
+    await writeFile(wine, '#!/bin/sh\nprintf \'be=<%s>\\n\' "${PROTON_BATTLEYE_RUNTIME-unset}"\n', { mode: 0o700 });
+    const quotedWine = `'${wine.replaceAll("'", `'"'"'`)}'`;
+    await writeFile(path.join(files, '../proton'), `#!/bin/sh\n[ "$1" = run ] && shift\nexec ${quotedWine} "$@"\n`, { mode: 0o700 });
+    await writeFile(path.join(files, 'bin/wineserver'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The official layout of Steam app 1161040: the Wine loader reads these.
+    await mkdir(path.join(battleye, 'v1/lib/wine'), { recursive: true });
+    await mkdir(path.join(battleye, 'v1/lib64/wine'), { recursive: true });
+    for (const name of ['beclient.dll', 'beclient.so']) await writeFile(path.join(battleye, 'v1/lib/wine', name), 'fixture');
+    for (const name of ['beclient_x64.dll', 'beclient_x64.so']) await writeFile(path.join(battleye, 'v1/lib64/wine', name), 'fixture');
+    // The native and Flatpak Steam roots are searched under this home too.
+    const home = path.join(root, 'home');
+    await mkdir(home, { recursive: true });
+    const runner = (await prepareProtonRunner(wine, compat, steam, undefined, { home }))!;
+    const environment: NodeJS.ProcessEnv = { ...process.env };
+    delete environment.PROTON_BATTLEYE_RUNTIME;
+    if (explicit !== undefined) environment.PROTON_BATTLEYE_RUNTIME = explicit;
+    const expected = explicit === undefined ? battleye : explicit;
+    for (const command of [runner.command, runner.launchCommand]) {
+      expect((await execFile(command, [], { env: environment })).stdout.trim()).toBe(`be=<${expected}>`);
+    }
+    // An explicit choice, including an empty one, must win by definedness.
+    for (const command of [runner.command, runner.launchCommand]) {
+      const script = await readFile(command, 'utf8');
+      expect(script).toContain('if [ "${PROTON_BATTLEYE_RUNTIME+x}" != x ]; then');
+      expect(script).not.toContain('${PROTON_BATTLEYE_RUNTIME:-}');
+    }
+  });
+
+  it('leaves PROTON_BATTLEYE_RUNTIME absent when no complete official tool is installed', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'xodus-nexus-be-absent-'));
+    created.push(root);
+    const files = path.join(root, 'runtime/files');
+    const wine = path.join(files, 'bin/wine');
+    const steam = path.join(root, 'steam');
+    const compat = path.join(root, 'compat');
+    const system32 = path.join(compat, 'pfx/drive_c/windows/system32');
+    await mkdir(path.dirname(wine), { recursive: true });
+    await mkdir(path.join(files, 'share/default_pfx'), { recursive: true });
+    await mkdir(system32, { recursive: true });
+    for (const dll of ['libvkd3d-utils-1.dll', 'dxgi.dll', 'd3d12.dll']) await writeFile(path.join(system32, dll), 'ready');
+    await writeFile(wine, '#!/bin/sh\nprintf \'be=<%s>\\n\' "${PROTON_BATTLEYE_RUNTIME-unset}"\n', { mode: 0o700 });
+    const quotedWine = `'${wine.replaceAll("'", `'"'"'`)}'`;
+    await writeFile(path.join(files, '../proton'), `#!/bin/sh\n[ "$1" = run ] && shift\nexec ${quotedWine} "$@"\n`, { mode: 0o700 });
+    await writeFile(path.join(files, 'bin/wineserver'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // A partial install (no 64-bit Wine bridge) must not be advertised.
+    await mkdir(path.join(steam, 'steamapps/common/Proton BattlEye Runtime/v1/lib/wine'), { recursive: true });
+    await writeFile(path.join(steam, 'steamapps/common/Proton BattlEye Runtime/v1/lib/wine/beclient.so'), 'fixture');
+    const home = path.join(root, 'home');
+    await mkdir(home, { recursive: true });
+    const runner = (await prepareProtonRunner(wine, compat, steam, undefined, { home }))!;
+    const environment: NodeJS.ProcessEnv = { ...process.env };
+    delete environment.PROTON_BATTLEYE_RUNTIME;
+    for (const command of [runner.command, runner.launchCommand]) {
+      expect((await execFile(command, [], { env: environment })).stdout.trim()).toBe('be=<unset>');
+      expect(await readFile(command, 'utf8')).not.toContain('PROTON_BATTLEYE_RUNTIME=');
+    }
+  });
+
   it("keeps each game's shader caches beside its prefix without overriding configuration", async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'xodus-nexus-shader-cache-'));
     created.push(root);

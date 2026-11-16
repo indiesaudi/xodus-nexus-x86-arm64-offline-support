@@ -1,8 +1,9 @@
 import { constants, promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { run } from './process.js';
-import { installedEacRuntime } from './anti-cheat.js';
+import { installedBattlEyeRuntime, installedEacRuntime } from './anti-cheat.js';
 import { prepareManagedPrefix } from './managed-prefix.js';
 import { systemGameLocale } from './game-locale.js';
 import { windowsGameLocale } from '../shared/game-language.js';
@@ -541,7 +542,7 @@ export async function prepareProtonRunner(
   compatibilityDataPath: string,
   steamRoot: string,
   shaderCacheLimitGiB = DEFAULT_SHADER_CACHE_GIB,
-  options: { installPath?: string } = {},
+  options: { installPath?: string; home?: string } = {},
 ): Promise<ProtonRunner | undefined> {
   const cacheLimits = shaderCacheLimits(shaderCacheLimitGiB);
   // An arm64 runtime keeps its own loader, prefix and ARM64X modules; Proton's
@@ -647,6 +648,7 @@ export async function prepareProtonRunner(
   const executablePath = [path.join(files, layout.bin), process.env.PATH ?? ''].filter(Boolean).join(':');
   const wineserver = path.join(files, layout.bin, 'wineserver');
   const eacRuntime = await installedEacRuntime(steamRoot);
+  const battlEyeRuntime = await installedBattlEyeRuntime(steamRoot, options.home ?? os.homedir());
   // Keep the caches outside temporary launch views, separately for each prefix.
   const shaderCaches = await prepareShaderCache(compatibilityDataPath);
   const defaultEnvironment = (name: string, value: string) => [
@@ -705,6 +707,9 @@ export async function prepareProtonRunner(
     // configure it at all. An explicit value, including an empty one, is a
     // choice: it must win over auto-discovery exactly like the settings above.
     ...(eacRuntime ? defaultEnvironment('PROTON_EAC_RUNTIME', eacRuntime) : []),
+    // The same rule selects Steam's official BattlEye bridge. It is exported
+    // only when installed; the game's own BattlEye client decides to use it.
+    ...(battlEyeRuntime ? defaultEnvironment('PROTON_BATTLEYE_RUNTIME', battlEyeRuntime) : []),
     // Private lifecycle command uses the exact same prefix/library environment
     // as launch. It is only invoked for explicit Stop/launcher shutdown.
     'if [ "${1:-}" = "--nexus-stop-prefix" ]; then',
