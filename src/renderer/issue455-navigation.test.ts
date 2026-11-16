@@ -10,9 +10,12 @@ beforeEach(()=>{
  stop=installGamepadNavigation(window,{mode:vi.fn(),back:vi.fn(),page:vi.fn(),keyboard,search});h.step();get('first').focus();h.press(2);
 });
 afterEach(()=>{stop();vi.restoreAllMocks();document.body.innerHTML='';});
-it('reaches top search from the page edge and Down returns to the remembered Settings field',()=>{
+it('reaches top search from the page edge and Down returns to the remembered Settings field',async()=>{
  h.press(12);expect(document.activeElement).toBe(get('search'));expect(keyboard).not.toHaveBeenCalled();
- h.press(0);expect(keyboard).toHaveBeenCalledOnce();h.press(13);expect(document.activeElement).toBe(get('first'));
+ h.press(0);expect(keyboard).toHaveBeenCalledOnce();
+ h.press(13);expect(document.activeElement).toBe(get('search')); // Still awaiting the keyboard reply.
+ await Promise.resolve();h.step(); // Refusal settles, then a real neutral frame re-arms navigation.
+ h.press(13);expect(document.activeElement).toBe(get('first'));
 });
 it('keeps Up within the current page while another field is available',()=>{
  get('middle').focus();h.press(12);expect(document.activeElement).toBe(get('first'));expect(search).not.toHaveBeenCalled();
@@ -24,9 +27,12 @@ it('never escapes a modal scope into the top search',()=>{
 it('retains the explicit Y search shortcut',()=>{
  get('middle').focus();h.press(3);expect(search).toHaveBeenCalledOnce();expect(document.activeElement).toBe(get('search'));
 });
-it('retains access to number and select fields without opening the keyboard during navigation',()=>{
+it('retains access to number and select fields without opening the keyboard during navigation',async()=>{
  h.press(13);expect(document.activeElement).toBe(get('middle'));expect(keyboard).not.toHaveBeenCalled();
- h.press(0);expect(keyboard).toHaveBeenCalledWith(expect.objectContaining({mode:3}));h.press(13);expect(document.activeElement).toBe(get('last'));
+ h.press(0);expect(keyboard).toHaveBeenCalledWith(expect.objectContaining({mode:3}));
+ h.press(13);expect(document.activeElement).toBe(get('middle'));
+ await Promise.resolve();h.step();
+ h.press(13);expect(document.activeElement).toBe(get('last'));
 });
 it('leaves a nested grid for a higher page action before reaching global search',()=>{
  const page=document.querySelector('.page-scroll')!;page.setAttribute('data-gamepad-page','home');

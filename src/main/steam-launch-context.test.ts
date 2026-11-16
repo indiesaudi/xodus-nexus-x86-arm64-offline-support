@@ -2,7 +2,7 @@ import { lstatSync, promises as fs } from 'node:fs';
 import { createConnection } from 'node:net';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { acceptSteamHandoff, captureSteamLaunchEnvironment, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest } from './steam-launch-context.js';
+import { acceptSteamHandoff, captureSteamLaunchEnvironment, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest, steamPrimaryEnvironment } from './steam-launch-context.js';
 
 const environment = { SteamGameId:'16968485195965530112', SteamAppId:'3950780123', SDL_GAMECONTROLLERCONFIG:'synthetic mapping with spaces' };
 const offers: ReturnType<typeof offerSteamHandoff>[] = [];
@@ -50,6 +50,65 @@ it('uses a copy for the current game and clears stale Steam filters, leaving des
   expect(changed).toEqual({ DISPLAY:':1', PATH:'/bin', PROTON_DISABLE_HIDRAW:'0x1234/0xabcd', ...environment });
   expect(base.SteamGameId).toBe('123'); expect(base.SDL_GAMECONTROLLER_IGNORE_DEVICES).toBe('stale');
 });
+
+// Issue 595: the Steam client puts its own cache locations in a process it
+// starts. Those names are never forwarded by a warm handoff, so a cold start
+// must not let them masquerade as explicit user overrides either.
+const steamCache = {
+  MESA_SHADER_CACHE_DIR:'/home/u/.local/share/Steam/steamapps/shadercache/4139748769',
+  MESA_SHADER_CACHE_MAX_SIZE:'1G',
+  MESA_DISK_CACHE_SINGLE_FILE:'1',
+  MESA_DISK_CACHE_READ_ONLY_FOZ_DBS:'a,b',
+  MESA_GLSL_CACHE_DIR:'/home/u/.local/share/Steam/steamapps/shadercache/4139748769/glsl',
+  MESA_GLSL_CACHE_MAX_SIZE:'1G',
+  __GL_SHADER_DISK_CACHE_PATH:'/home/u/.local/share/Steam/steamapps/shadercache/4139748769/nv',
+  __GL_SHADER_DISK_CACHE_APP_NAME:'app',
+  __GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME:'ro',
+  __GL_SHADER_DISK_CACHE_SKIP_CLEANUP:'1',
+  DXVK_STATE_CACHE_PATH:'/home/u/.local/share/Steam/steamapps/shadercache/4139748769/dxvk',
+  ENABLE_VK_LAYER_VALVE_steam_fossilize_1:'1',
+  STEAM_FOSSILIZE_DUMP_PATH:'/home/u/.local/share/Steam/steamapps/shadercache/4139748769/foz',
+  STEAM_FOSSILIZE_REPLAY_WRAP:'1',
+};
+const steamCacheNames = ['MESA_SHADER_CACHE_DIR','MESA_SHADER_CACHE_MAX_SIZE','MESA_DISK_CACHE_SINGLE_FILE',
+  'MESA_DISK_CACHE_READ_ONLY_FOZ_DBS','MESA_GLSL_CACHE_DIR','MESA_GLSL_CACHE_MAX_SIZE','__GL_SHADER_DISK_CACHE_PATH',
+  '__GL_SHADER_DISK_CACHE_APP_NAME','__GL_SHADER_DISK_CACHE_READ_ONLY_APP_NAME','__GL_SHADER_DISK_CACHE_SKIP_CLEANUP',
+  'DXVK_STATE_CACHE_PATH','ENABLE_VK_LAYER_VALVE_steam_fossilize_1','STEAM_FOSSILIZE_DUMP_PATH','STEAM_FOSSILIZE_REPLAY_WRAP'];
+const retained = { PATH:'/bin', DISPLAY:':1', VK_LAYER_PATH:'/usr/share/vulkan/explicit_layer.d', VK_INSTANCE_LAYERS:'VK_LAYER_MESA_device_select' };
+
+it('drops Steam cache variables only when the main process itself was started by Steam', () => {
+  // Cold: a game shortcut (or the AppImage added directly to Steam) started Nexus.
+  const cold = { ...retained, ...steamCache, SteamGameId:'4139748769', SteamAppId:'4139748769' };
+  expect(steamPrimaryEnvironment(cold)).toBe(true);
+  const coldGame = steamGameEnvironment(cold, captureSteamLaunchEnvironment(cold));
+  for (const name of steamCacheNames) expect(coldGame[name]).toBeUndefined();
+  // Steam identity is still forwarded, explicit Vulkan loader settings stay.
+  expect(coldGame).toMatchObject({ ...retained, SteamGameId:'4139748769', SteamAppId:'4139748769' });
+  // The inherited environment object is never mutated.
+  expect(cold.MESA_SHADER_CACHE_DIR).toBe(steamCache.MESA_SHADER_CACHE_DIR);
+});
+
+it('keeps custom cache settings across a warm Steam shortcut request', () => {
+  // Warm: Nexus was started normally, a later Steam shortcut only adds identity.
+  const warm = { ...retained, MESA_SHADER_CACHE_DIR:'/home/u/custom-mesa', DXVK_STATE_CACHE_PATH:'/home/u/custom-dxvk' };
+  expect(steamPrimaryEnvironment(warm)).toBe(false);
+  const request = { SteamGameId:'4139748769', SteamAppId:'4139748769' };
+  const warmGame = steamGameEnvironment(warm, request);
+  expect(warmGame).toMatchObject({ ...warm, ...request });
+  // Opening Nexus from its own shortcut then pressing Play keeps the same setting.
+  expect(steamGameEnvironment(warm, captureSteamLaunchEnvironment({ ...request, SteamOverlayGameId:'4139748769' })))
+    .toMatchObject({ MESA_SHADER_CACHE_DIR:'/home/u/custom-mesa', DXVK_STATE_CACHE_PATH:'/home/u/custom-dxvk' });
+  // No Steam identity at all: an ordinary Play keeps everything.
+  expect(steamGameEnvironment(warm)).toEqual(warm);
+});
+
+it('recognizes only a genuine Steam identity as a Steam-started main process', () => {
+  for (const value of [undefined, '', '0', '-1', 'not-a-number', '18446744073709551616'])
+    expect(steamPrimaryEnvironment({ ...steamCache, SteamGameId:value })).toBe(false);
+  expect(steamPrimaryEnvironment(steamCache)).toBe(false);
+  expect(steamPrimaryEnvironment({ SteamGameId:'1' })).toBe(true);
+});
+
 
 it('keeps the authenticated secondary alive until game cleanup and closes exactly once', async () => {
   const f = await offer();

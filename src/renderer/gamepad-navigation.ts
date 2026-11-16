@@ -1,4 +1,4 @@
-import { isTextField, requestTextKeyboard } from './touch-keyboard';
+import { activeTextEntry, endTextEntry, isTextField, requestTextKeyboard } from './touch-keyboard';
 import type { SteamKeyboardRequest } from '../shared/types';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
@@ -114,6 +114,7 @@ export function installGamepadNavigation(win: Window, options: Options): () => v
   let picker: HTMLElement | undefined;
   let heldFocus: HTMLElement | undefined;
   let escapeFromPad = false;
+  let textEntryId: number | undefined; // One explicit text-entry session, not native OSK visibility.
   let pendingDetail: { id: string; origin: HTMLElement; deadline: number } | undefined;
   let detailReturn: { id: string; origin: HTMLElement } | undefined;
   const visible = (element: HTMLElement) => {
@@ -296,8 +297,31 @@ export function installGamepadNavigation(win: Window, options: Options): () => v
     if (restore) focus(target);
   };
   const pointer = () => { heldFocus = undefined; pendingDetail = undefined; setMode(false); inputs.forEach(input => input.reset()); };
+  const leaveTextEntry = (id: number) => {
+    if (!endTextEntry(id)) return;
+    textEntryId = undefined;
+    inputs.forEach(input => input.reset());
+  };
+  /** Synchronize before polling: a neutral frame after refusal can re-arm the
+   * existing PadInput, without a second ignored/arming state machine. */
+  const syncTextEntry = () => {
+    let current = activeTextEntry();
+    if (current && doc.activeElement !== current.field) {
+      endTextEntry(current.id);
+      current = undefined;
+    }
+    if (textEntryId !== current?.id) {
+      textEntryId = current?.id;
+      inputs.forEach(input => input.reset());
+    }
+  };
   const pointerMove = (event: PointerEvent) => { if (event.movementX || event.movementY) pointer(); };
   const keyboard = (event: KeyboardEvent) => {
+    const entry = activeTextEntry();
+    if (!escapeFromPad && entry && doc.activeElement === entry.field && event.key === 'Escape') {
+      leaveTextEntry(entry.id);
+      return; // Keep ordinary Escape handling. Enter submits, but does not prove the OSK closed.
+    }
     if (!escapeFromPad) {
       if (picker && event.key === 'Escape') { closePicker(true); event.preventDefault(); event.stopImmediatePropagation(); }
       if (picker && event.key === 'Tab') {
@@ -352,7 +376,14 @@ export function installGamepadNavigation(win: Window, options: Options): () => v
   const activate = () => {
     const element = focused();
     if (!element || !scope.contains(element) || !enabled(element) || pendingDetail) return;
-    if (isTextField(element) && options.keyboard) void requestTextKeyboard(win, element, options.keyboard).catch(() => {});
+    // Text entry starts with the request itself, so no pad input reaches the
+    // launcher while the keyboard is pending or open.
+    if (isTextField(element) && options.keyboard) {
+      const request = requestTextKeyboard(win, element, options.keyboard);
+      if (!activeTextEntry()) return; // An ineligible field never opens a session.
+      textEntryId = activeTextEntry()?.id;
+      void request.catch(() => {});
+    }
     else if (element instanceof HTMLSelectElement) selectPicker(element);
     else if (element.hasAttribute('data-gamepad-card-activate')) {
       // A on a Store card delegates only to its real, enabled action. Selection
@@ -594,6 +625,7 @@ export function installGamepadNavigation(win: Window, options: Options): () => v
         if (active) blur();
         inputs.forEach(input => input.reset());
       } else {
+        syncTextEntry();
         const pads = [...(win.navigator.getGamepads?.() ?? [])].filter((pad): pad is Gamepad => Boolean(pad?.connected && pad.mapping === 'standard'));
         const present = new Set<string>();
         let handled = false;
@@ -602,14 +634,22 @@ export function installGamepadNavigation(win: Window, options: Options): () => v
           if (!inputs.has(key)) inputs.set(key, new PadInput());
           const next = inputs.get(key)!.poll(pad, now);
           if (!handled && (next.action || next.scroll)) {
-            handled = true; setMode(true);
+            handled = true;
+            if (textEntryId !== undefined) {
+              // A selects letters in Steam. B ends entry, but must not also
+              // navigate Back or scroll the launcher on this same frame.
+              if (next.action === 'back') leaveTextEntry(textEntryId);
+              continue;
+            }
+            setMode(true);
             if (next.action) action(next.action);
-            if (next.scroll) scroll(next.scroll, elapsed);
+            if (next.scroll && textEntryId === undefined && !activeTextEntry()) scroll(next.scroll, elapsed);
           }
         }
         for (const key of inputs.keys()) if (!present.has(key)) inputs.delete(key);
         if (!pads.length) { setMode(false); closePicker(false); }
-        if (active) ensureFocus();
+        // Keep the typing field focused; the pad must not move it.
+        if (active && textEntryId === undefined && !activeTextEntry()) ensureFocus();
       }
     } catch { blur(); inputs.clear(); } // Unsupported browser/device must not break mouse UI.
     frame = win.requestAnimationFrame(tick);
