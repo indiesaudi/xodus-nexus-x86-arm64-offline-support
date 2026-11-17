@@ -2550,10 +2550,15 @@ async function createWindow(): Promise<void> {
   const demoCaptureDir = process.env.XODUS_DEMO_CAPTURE_DIR;
   if (demoCaptureDir && !demoMode) throw new Error('Demo capture requires XODUS_DEMO=1; real account data must not be captured.');
   const hiddenCapture = Boolean(smokeScreenshot || demoCaptureDir);
+  // Gamescope Gaming Mode has no desktop window manager or native menu. Use a
+  // true fullscreen window there, but never for hidden capture runs and never
+  // on a desktop session that merely carries a Steam shortcut environment.
+  const gamingMode = !hiddenCapture && process.platform === 'linux' && !nativeDialogsAvailable();
   // The compositor places unpositioned windows, which under Xwayland often
   // means the wrong monitor (see issue #5). Restore the last user placement
   // when it is still on a connected display, otherwise center on the primary.
-  const windowState = hiddenCapture ? undefined : readWindowState();
+  // Gaming Mode must not read desktop placement, and must not save over it.
+  const windowState = hiddenCapture || gamingMode ? undefined : readWindowState();
   const bounds = windowState && restoredBoundsOnScreen(windowState)
     ? windowState
     : { x: undefined as number | undefined, y: undefined as number | undefined,
@@ -2583,6 +2588,7 @@ async function createWindow(): Promise<void> {
     title: launcherDisplayName,
     icon: fileURLToPath(new URL('../../assets/icon.png', import.meta.url)),
     autoHideMenuBar: true,
+    fullscreen: gamingMode,
     show: !hiddenCapture,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.cjs'),
@@ -2592,11 +2598,16 @@ async function createWindow(): Promise<void> {
       offscreen: hiddenCapture,
     },
   });
+  if (gamingMode) {
+    // Remove the Electron File/Edit menu and its Alt accelerator entirely.
+    mainWindow.setMenu(null);
+    mainWindow.setMenuBarVisibility(false);
+  }
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => console.error('Renderer load failed', code, description));
   mainWindow.webContents.on('render-process-gone', (_event, details) => console.error('Renderer process exited', details.reason));
   if (smokeScreenshot) mainWindow.webContents.on('console-message', (_event, level, message) => console.error(`Renderer console [${level}]`, message));
   if (!hiddenCapture) mainWindow.once('ready-to-show', () => mainWindow?.show());
-  if (!hiddenCapture) {
+  if (!hiddenCapture && !gamingMode) {
     if (windowState?.maximized || tooLarge) mainWindow.maximize();
     mainWindow.on('close', () => { if (mainWindow) saveWindowState(mainWindow); });
   }
