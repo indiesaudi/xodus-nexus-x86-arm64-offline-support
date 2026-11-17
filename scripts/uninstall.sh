@@ -25,17 +25,57 @@ esac
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'Kept: %s\n' "$*" >&2; }
+desktop_quote() {
+  local quoted
+  quoted=$(printf '%s' "$1" | sed -e 's/\\/\\\\\\\\/g' -e 's/"/\\\\"/g' -e 's/`/\\\\`/g' -e 's/\$/\\\\$/g' -e 's/%/%%/g')
+  printf '"%s"' "$quoted"
+}
+desktop_value() {
+  local value=$1
+  value=${value//\\/\\\\}
+  printf '%s' "$value"
+}
 [[ -n "${HOME:-}" ]] || die 'HOME must be set.'
-nexus_prefix="${XODUS_NEXUS_PREFIX:-$HOME/.local}"
-nexus_data="${XDG_DATA_HOME:-$HOME/.local/share}"
-[[ "$nexus_prefix" == /* && "$nexus_data" == /* ]] || die 'Installation paths must be absolute.'
-nexus_prefix="$(realpath -m -- "$nexus_prefix")"
-nexus_data="$(realpath -m -- "$nexus_data")"
+nexus_raw_prefix="${XODUS_NEXUS_PREFIX:-$HOME/.local}"
+nexus_raw_data="${XDG_DATA_HOME:-$HOME/.local/share}"
+[[ "$nexus_raw_prefix" == /* && "$nexus_raw_data" == /* ]] || die 'Installation paths must be absolute.'
+# Canonical paths locate files. Lexical and raw paths preserve installer
+# spellings so trailing slashes and '.' components compare equivalently.
+nexus_prefix="$(realpath -m -- "$nexus_raw_prefix")"
+nexus_data="$(realpath -m -- "$nexus_raw_data")"
+nexus_lexical_prefix="$(realpath -ms -- "$nexus_raw_prefix")"
 nexus_app="$nexus_prefix/opt/xodus-nexus"
 nexus_images=("$nexus_app/Nexus-Launcher.AppImage" "$nexus_app/Xodus-Nexus.AppImage")
 nexus_command="$nexus_prefix/bin/xodus-nexus"
+nexus_icon="$nexus_app/icon.png"
+nexus_lexical_app="$nexus_lexical_prefix/opt/xodus-nexus"
+nexus_lexical_command="$nexus_lexical_prefix/bin/xodus-nexus"
+nexus_lexical_icon="$nexus_lexical_app/icon.png"
+nexus_raw_app="$nexus_raw_prefix/opt/xodus-nexus"
+nexus_raw_command="$nexus_raw_prefix/bin/xodus-nexus"
+nexus_raw_icon="$nexus_raw_app/icon.png"
 nexus_desktop_dir="$nexus_data/applications"
 nexus_desktop="$nexus_desktop_dir/xodus-nexus.desktop"
+nexus_env_exec="/usr/bin/env -- $(desktop_quote "$nexus_command") %U"
+nexus_lexical_env_exec="/usr/bin/env -- $(desktop_quote "$nexus_lexical_command") %U"
+nexus_exec_candidates=(
+  "$nexus_env_exec"
+  "$nexus_lexical_env_exec"
+  "$nexus_command %U"
+  "$(desktop_quote "$nexus_command") %U"
+  "$nexus_raw_command %U"
+  "$(desktop_quote "$nexus_raw_command") %U"
+  "$nexus_lexical_command %U"
+  "$(desktop_quote "$nexus_lexical_command") %U"
+)
+nexus_icon_candidates=(
+  "$nexus_icon"
+  "$(desktop_value "$nexus_icon")"
+  "$nexus_raw_icon"
+  "$(desktop_value "$nexus_raw_icon")"
+  "$nexus_lexical_icon"
+  "$(desktop_value "$nexus_lexical_icon")"
+)
 [[ ! -L "$nexus_app" ]] || die "The application directory is a symlink: $nexus_app"
 
 # Do not race an in-app update, and never terminate a running process.
@@ -79,9 +119,34 @@ elif [[ -e "$nexus_command" ]]; then
   warn "command not created by the installer: $nexus_command"
 fi
 if [[ -f "$nexus_desktop" && ! -L "$nexus_desktop" ]]; then
-  if { grep -Fxq -- 'Name=Xodus Nexus' "$nexus_desktop" || grep -Fxq -- 'Name=Nexus Launcher' "$nexus_desktop"; } &&
-     grep -Fxq -- "Exec=$nexus_prefix/bin/xodus-nexus %U" "$nexus_desktop" &&
-     grep -Fxq -- "Icon=$nexus_app/icon.png" "$nexus_desktop"; then
+  nexus_name_owned=0
+  if grep -Fxq -- 'Name=Xodus Nexus' "$nexus_desktop" || grep -Fxq -- 'Name=Nexus Launcher' "$nexus_desktop"; then
+    nexus_name_owned=1
+  fi
+  nexus_exec_owned=0
+  for nexus_candidate in "${nexus_exec_candidates[@]}"; do
+    if grep -Fxq -- "Exec=$nexus_candidate" "$nexus_desktop"; then nexus_exec_owned=1; break; fi
+  done
+  if [[ "$nexus_exec_owned" -eq 0 ]]; then
+    nexus_exec_line=$(awk 'substr($0,1,5)=="Exec="{print substr($0,6); exit}' "$nexus_desktop") || true
+    if [[ -n "$nexus_exec_line" && "$nexus_exec_line" == *" %U" && "$nexus_exec_line" != \"* ]]; then
+      nexus_exec_path="${nexus_exec_line% %U}"
+      if [[ -n "$nexus_exec_path" && "$(realpath -ms -- "$nexus_exec_path")" == "$(realpath -ms -- "$nexus_lexical_command")" ]]; then
+        nexus_exec_owned=1
+      fi
+    fi
+  fi
+  nexus_icon_owned=0
+  for nexus_candidate in "${nexus_icon_candidates[@]}"; do
+    if grep -Fxq -- "Icon=$nexus_candidate" "$nexus_desktop"; then nexus_icon_owned=1; break; fi
+  done
+  if [[ "$nexus_icon_owned" -eq 0 ]]; then
+    nexus_icon_line=$(awk 'substr($0,1,5)=="Icon="{print substr($0,6); exit}' "$nexus_desktop") || true
+    if [[ -n "$nexus_icon_line" && "$(realpath -ms -- "$nexus_icon_line")" == "$(realpath -ms -- "$nexus_lexical_icon")" ]]; then
+      nexus_icon_owned=1
+    fi
+  fi
+  if [[ "$nexus_name_owned" -eq 1 && "$nexus_exec_owned" -eq 1 && "$nexus_icon_owned" -eq 1 ]]; then
     remove_file "$nexus_desktop"
   else warn "application entry not matching this installation: $nexus_desktop"; fi
 elif [[ -e "$nexus_desktop" || -L "$nexus_desktop" ]]; then

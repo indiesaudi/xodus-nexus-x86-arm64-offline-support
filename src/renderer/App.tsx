@@ -2,7 +2,7 @@ import {useComponentUpdates} from './ComponentUpdates';
 import {ManagedRuntimeSettings} from './ManagedRuntimeSettings';
 import {StatusDot} from './StatusDot';
 import {useGameRuntimeReady} from './useGameRuntimeReady';
-import {useStoreAccess} from './store-access';
+import {storeAccessBatches,useStoreAccess,useStoreAccessScopes} from './store-access';
 import {GameRuntimeFields} from './GameRuntimeFields';
 import {runtimeFamilyLabels,type InstalledRuntimeFamily,type GameRuntimeSelection} from '../shared/runtime-selection';
 import { CloudSaveWarning } from './CloudSaveWarning';
@@ -92,7 +92,7 @@ function errorMessage(error: unknown): string {
 }
 
 export function GameTitle({ title }: { title: string }) {
-  return <strong title={title}>{title}</strong>;
+  return <strong data-tooltip={title} data-tooltip-primary="">{title}</strong>;
 }
 
 function NavItem({ active, icon, label, badge, onClick, autoSelect = false }: {
@@ -115,7 +115,7 @@ export function Sidebar({ data, page, go, openGame, openProfile, notifications, 
 
 function AccountMembership({ auth }: { auth: AppSnapshot['auth'] }) {
   const label = auth.stored === true ? subscriptionBadge(auth.subscription) : undefined;
-  if (label) return <small className="account-membership" title={ui("ui.subscription_verified_a950738", { date: new Date(auth.subscription!.checkedAt).toLocaleString() })}>{label}</small>;
+  if (label) return <small className="account-membership" data-tooltip={ui("ui.subscription_verified_a950738", { date: new Date(auth.subscription!.checkedAt).toLocaleString() })}>{label}</small>;
   return auth.stored === true ? null : <small>{auth.stored === false ? (auth.player ? ui("auth.store_signed_out") : ui("ui.not_signed_in_491fc91")) : ui("ui.status_unavailable_7eb5af9")}</small>;
 }
 
@@ -156,7 +156,7 @@ export function TopStatus({ data, go, openFriends }: { data: AppSnapshot; go: (p
   const updateTitle = [restart ? ui('home.restart_update') : '', updates.length ? ui('home.available_updates', { updates: updates.join(', ') }) : ''].filter(Boolean).join(' ');
   if (!restart && !updates.length) return null;
   return <div className="top-status">
-    <button className="update-notice" title={updateTitle} aria-label={updateTitle} onClick={() => go('settings')}><ArrowDownToLine /><strong>{restart ? ui("ui.restart_available_cad1527") : ui("ui.update_available_ff8b555")}</strong></button>
+    <button className="update-notice" data-tooltip={updateTitle} aria-label={updateTitle} onClick={() => go('settings')}><ArrowDownToLine /><strong>{restart ? ui("ui.restart_available_cad1527") : ui("ui.update_available_ff8b555")}</strong></button>
   </div>;
 }
 
@@ -246,7 +246,7 @@ export function HomePage({ data, go, action, openGame, returnFocusKey, toast }: 
   const gamePass = useRecentGamePassShelf();
   const [gamePassProduct, setGamePassProduct] = useState<CatalogProduct>();
   const [gamePassOpen, setGamePassOpen] = useState(false);
-  const gamePassAccess = useStoreAccess(data, gamePassOpen);
+  const gamePassAccess = useStoreAccess(data, gamePassOpen, gamePassProduct ? [gamePassProduct] : []);
   const homeScroll = useRef(0);
   const gamePassWasOpen = useRef(false);
   useBrowserLayoutEffect(() => {
@@ -315,12 +315,12 @@ export function HomePage({ data, go, action, openGame, returnFocusKey, toast }: 
 }
 
 function CatalogSupportBadge({ product }: { product: CatalogProduct }) {
-  return <span className={`catalog-support ${product.installability}`} title={uiText(product.supportNote)}
+  return <span className={`catalog-support ${product.installability}`} data-tooltip={uiText(product.supportNote)}
     aria-label={product.installability === 'unknown' ? ui("ui.package_support_unknown_12fe897") : undefined}>{product.installability === 'supported' ? 'PC' : product.installability === 'unknown' ? '?' : ui("ui.unsupported_5432465")}</span>;
 }
 
-export function StoreProductCard({ product, selected, disabled, label, select, install, licensed = false }: {
-  product: CatalogProduct; selected: boolean; disabled: boolean; label: string; licensed?: boolean;
+export function StoreProductCard({ product, selected, disabled, label, select, install, licensed = false, verify = false }: {
+  product: CatalogProduct; selected: boolean; disabled: boolean; label: string; licensed?: boolean; verify?: boolean;
   select: (product: CatalogProduct,openDetails?:boolean) => void; install: (product: CatalogProduct) => void;
 }) {
   const price=publicStorePrice(product);
@@ -329,10 +329,10 @@ export function StoreProductCard({ product, selected, disabled, label, select, i
       onFocus={() => select(product,false)} onClick={() => select(product,true)}>
       {product.posterUrl ? <img src={product.posterUrl} alt={ui("ui.cover_47bbe4b", { game: product.title })} /> : <div className="catalog-cover-placeholder"><Gamepad2 /></div>}
       <CatalogSupportBadge product={product} />
-      <div><GameTitle title={product.title} /><small>{product.publisher ?? product.productId}</small><span title={price ? ui('store.us_price_context') : undefined}>{product.purchasePrice ?? ui("ui.price_unavailable_6a9e657")}{price ? ` · ${ui('store.us_price_short')}` : ''}{product.includedWith ? ` · ${product.includedWith}` : ''}</span></div>
+      <div><GameTitle title={product.title} /><small>{product.publisher ?? product.productId}</small><span data-tooltip={price ? ui('store.us_price_context') : undefined}>{product.purchasePrice ?? ui("ui.price_unavailable_6a9e657")}{price ? ` · ${ui('store.us_price_short')}` : ''}{product.includedWith ? ` · ${product.includedWith}` : ''}</span></div>
     </button>
     {licensed ? <button className="catalog-card-install" data-gamepad-skip data-gamepad-card-action disabled={disabled} onClick={() => install(product)}>
-      {label === 'Preparing…' ? <LoaderCircle className="spin" /> : label === 'Installed' ? <Check /> : <Download />}{label}
+      {label === 'Preparing…' ? <LoaderCircle className="spin" /> : label === 'Installed' ? <Check /> : <Download />}{verify ? ui('ui.verify_and_install_27d773b') : label}
     </button> : <button className="catalog-card-install" data-gamepad-skip data-gamepad-card-action onClick={() => window.open(product.storeUrl ?? `https://www.xbox.com/games/store/p/${product.productId}`, '_blank')}>{ui("ui.store_page_9c667df")}</button>}
   </article>;
 }
@@ -350,7 +350,6 @@ export function StorePagination({ page, loading, error, load }: { page?: StoreLi
 
 export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot; toast: (value: Toast) => void; go: (page: Page) => void; initialQuery: string }) {
   const startPackageInstall = usePackageInstall();
-  const access = useStoreAccess(data);
   // The Store shows one paged list at a time: public search results, or the
   // featured landing page continued by the same collection feed.
   const [search, setSearch] = useState<(StoreListPage & { query: string })>();
@@ -381,6 +380,12 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
     wasOpen.current=detailOpen&&Boolean(selected);
   },[detailOpen,selected?.productId]);
   const [busy, setBusy] = useState<string>();
+  // Store access covers exactly the displayed feed (search, or the landing page
+  // continued by browse) plus the explicit selection, in bounded batches. The
+  // selected product is always requested first, never dropped by a cap.
+  const displayed = search ? search.products : [...(featured?.products ?? []), ...browse.products];
+  const accessBatches = useMemo(() => storeAccessBatches(displayed, selected), [displayed, selected]);
+  const access = useStoreAccessScopes(data, accessBatches);
 
   /** Drops every page-scoped search value instead of leaving it to a stale
    * request, so a later feed never inherits the previous query's state. */
@@ -518,11 +523,11 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
   }, [autoKey, listOnScreen, detailOpen]);
 
   async function install(product: CatalogProduct, target = installDestination(product)) {
-    if (!access.canInstall(product)) return;
+    if (!access.eligible(product)) return;
     setBusy(product.productId);
     try {
       const request={...catalogInstallRequest(product,target),source:'store' as const};
-      if (!await startPackageInstall(request, () => access.canInstall(product))) return;
+      if (!await startPackageInstall(request, () => access.eligible(product))) return;
       toast({ kind: 'success', message: ui("ui.xodus_is_checking_the_license_and_installing_be774b2", { game: product.title }) });
       go('downloads');
     } catch (error) { toast({ kind: 'error', message: errorMessage(error) }); }
@@ -536,7 +541,7 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
   const productGrid = (products: CatalogProduct[]) => <div className="catalog-grid" data-gamepad-grid>{products.map((product) => {
     const installed = isInstalled(product);
     return <StoreProductCard key={product.productId} product={product} selected={selected?.productId === product.productId}
-      licensed={access.canInstall(product)}
+      licensed={access.eligible(product)} verify={access.eligibility(product)==='verify'}
       disabled={product.installability !== 'supported' || Boolean(busy) || !data.backend.capabilities.streaming || installed || isQueued(product)}
       label={installed ? ui("ui.installed_f8b32f4") : isQueued(product) ? ui("ui.in_install_queue_7c818f2") : busy === product.productId ? ui("ui.preparing_5d1fa38") : ui("ui.install_569ca49")}
       select={selectProduct} install={install} />;
@@ -586,8 +591,8 @@ export function GameMenuActions({ game, options, busy, onBrowse, onSettings, onI
     <button role="menuitem" onClick={onSettings}><Settings2 />{ui("ui.game_settings_fece860")}</button>
     <button role="menuitem" disabled={!onShortcut || game.installState !== 'ready'} onClick={() => onShortcut?.('desktop')}><Plus />{ui("ui.create_desktop_shortcut_bf2f4ab")}</button>
     <button role="menuitem" disabled={!onShortcut || game.installState !== 'ready'} onClick={() => onShortcut?.('applications')}><Plus />{ui("ui.add_to_applications_menu_0c0294f")}</button>
-    <button role="menuitem" disabled={!onShortcut || game.installState !== 'ready'} title={ui("ui.add_a_shortcut_with_available_artwork_including_dcb0616")} onClick={() => onShortcut?.('steam')}><Plus />{ui("ui.add_to_steam_de2e912")}</button>
-    <button role="menuitem" disabled={busy || game.installState !== 'ready' || !options?.vcInstall} title={uiText(options?.vcReason)} onClick={onInstallVc}><Download />{ui("ui.install_update_vc_79a9f19")}</button>
+    <button role="menuitem" disabled={!onShortcut || game.installState !== 'ready'} data-tooltip={ui("ui.add_a_shortcut_with_available_artwork_including_dcb0616")} onClick={() => onShortcut?.('steam')}><Plus />{ui("ui.add_to_steam_de2e912")}</button>
+    <button role="menuitem" disabled={busy || game.installState !== 'ready' || !options?.vcInstall} data-tooltip={uiText(options?.vcReason)} onClick={onInstallVc}><Download />{ui("ui.install_update_vc_79a9f19")}</button>
     <button role="menuitem" className="danger" disabled={busy} onClick={onRemove}><Trash2 />{ui("ui.remove_game_7d93c8f")}</button>
   </>;
 }
@@ -726,7 +731,7 @@ export function AccountGames({ data, toast, selectedId, select, menu, openProduc
       <label>{ui("ui.play_state_6f423d1")}<select aria-label={ui("ui.play_state_6f423d1")} value={playState} onChange={event => setPlayState(event.target.value as typeof playState)}><option value="all">{ui("ui.all_states_f189411")}</option><option value="installed">{ui("ui.installed_f8b32f4")}</option><option value="installable">{ui("ui.ready_to_install_bda18b9")}</option></select></label>
       {kind === 'gamepass' ? <label>{ui("ui.sort_bec6903")}<select aria-label={ui("ui.library_order_4dbb747")} value={sort ?? 'default'} onChange={event => updateFilters({sort:event.target.value === 'recent-gamepass' ? 'recent-gamepass' : undefined})}><option value="default">{ui("ui.default_order_f44484d")}</option><option value="recent-gamepass">{ui("ui.recently_added_to_game_pass_0c69d8c")}</option></select></label> : null}
       <label className="library-filter-search">{ui("ui.search_49c266b")}<input aria-label={ui("ui.search_library_21a933a")} placeholder={ui("ui.search_your_games_17caf33")} value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <button className="secondary library-refresh" aria-label={ui("ui.refresh_library_c628c56")} title={ui("ui.refresh_library_c628c56")} disabled={!available || busy} onClick={() => load(true)}>{busy ? <LoaderCircle className="spin" /> : <RefreshCw />}</button>
+      <button className="secondary library-refresh" aria-label={ui("ui.refresh_library_c628c56")} data-tooltip={ui("ui.refresh_library_c628c56")} disabled={!available || busy} onClick={() => load(true)}>{busy ? <LoaderCircle className="spin" /> : <RefreshCw />}</button>
     </div>
     <div className="account-games-results">
     {!available ? <p>{data.auth.stored !== true ? ui("ui.sign_in_to_load_your_account_games_installed_gam_580df7e") : !data.backend.capabilities.library ? ui("ui.update_the_xodus_backend_to_load_account_license_570a2f1") : ui("ui.wait_for_sign_in_to_finish_621aaa0")}</p> : null}
@@ -738,8 +743,8 @@ export function AccountGames({ data, toast, selectedId, select, menu, openProduc
           const license = access(game);
           return <div className={`library-card-wrap catalog-card ${selectedId === game.id ? 'selected' : ''}`} data-gamepad-card key={game.id} onContextMenu={event => { event.preventDefault(); menu?.(game, event.clientX, event.clientY); }}>
             <button className="library-card catalog-card-main" data-gamepad-auto-select="focus" data-gamepad-detail-target={game.id} onFocus={() => select?.(game, false)} onClick={() => select?.(game, true)} onKeyDown={event => { if (event.key === 'F10' && event.shiftKey) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); menu?.(game, rect.left + 16, rect.top + 16); } }}><Cover game={game} /><div><GameTitle title={game.title} /><small>{game.publisher ?? ui("ui.local_installation_e5d8322")}</small><span>{license === 'owned' ? ui("ui.owned_17b760c") : license === 'gamepass' ? ui("ui.game_pass_5c83b40") : license === 'other' ? ui("ui.other_access_542b2ae") : ui("ui.local_installation_e5d8322")}</span></div></button>
-            <span className="catalog-card-status" title={uiText(game.installMessage)}>{game.installState === 'incomplete' ? <><CircleAlert />{ui("ui.incomplete_75f33cd")}</> : game.installState === 'imported' ? <><FolderOpen />{ui("ui.imported_321f179")}</> : <><Check />{data.gameUpdates?.[game.id]?.available ? ui("ui.update_available_ff8b555") : ui("ui.installed_f8b32f4")}</>}</span>
-            <button className="library-card-menu-button" data-game-menu-trigger data-gamepad-skip aria-label={ui("ui.options_for_e196873", { game: game.title })} aria-haspopup="menu" title={ui("ui.options_for_e196873", { game: game.title })} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); menu?.(game, rect.right, rect.bottom); }}><MoreHorizontal /></button>
+            <span className="catalog-card-status" data-tooltip={uiText(game.installMessage)}>{game.installState === 'incomplete' ? <><CircleAlert />{ui("ui.incomplete_75f33cd")}</> : game.installState === 'imported' ? <><FolderOpen />{ui("ui.imported_321f179")}</> : <><Check />{data.gameUpdates?.[game.id]?.available ? ui("ui.update_available_ff8b555") : ui("ui.installed_f8b32f4")}</>}</span>
+            <button className="library-card-menu-button" data-game-menu-trigger data-gamepad-skip aria-label={ui("ui.options_for_e196873", { game: game.title })} aria-haspopup="menu" data-tooltip={ui("ui.options_for_e196873", { game: game.title })} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); menu?.(game, rect.right, rect.bottom); }}><MoreHorizontal /></button>
           </div>;
         }
         const product = row.product!;
@@ -762,7 +767,7 @@ function AccountGamesForUser(props: AccountGamesProps) {
 
 export function ContentList({ plan, disabled, pending, install }: { plan: GameContentPlan; disabled: boolean; pending?: string; install: (id: string) => void }) {
   return <div className="content-list">{plan.items.length ? plan.items.map(item => <article key={item.productId}>
-    <div><strong title={item.title}>{item.title}</strong><small>{item.access === 'owned' ? ui("ui.owned_17b760c") : item.access === 'gamepass' ? ui("ui.game_pass_5c83b40") : item.access === 'other' ? ui("ui.other_access_542b2ae") : ui("ui.license_not_verified_b4ac386")} · {item.status === 'installed' ? ui("ui.installed_f8b32f4") : item.status === 'verify' ? ui("ui.license_check_required_cb65e96") : item.status === 'available' ? ui("ui.not_installed_d177cdc") : item.status === 'license-only' ? ui("ui.no_download_required_56d8478") : item.status === 'bundle' ? ui("ui.content_bundle_ccfe4f2") : item.status === 'unsupported' ? ui("ui.unsupported_package_d72ac5f") : ui("ui.unavailable_ca18449")}</small>
+    <div><strong data-tooltip={item.title}>{item.title}</strong><small>{item.access === 'owned' ? ui("ui.owned_17b760c") : item.access === 'gamepass' ? ui("ui.game_pass_5c83b40") : item.access === 'other' ? ui("ui.other_access_542b2ae") : ui("ui.license_not_verified_b4ac386")} · {item.status === 'installed' ? ui("ui.installed_f8b32f4") : item.status === 'verify' ? ui("ui.license_check_required_cb65e96") : item.status === 'available' ? ui("ui.not_installed_d177cdc") : item.status === 'license-only' ? ui("ui.no_download_required_56d8478") : item.status === 'bundle' ? ui("ui.content_bundle_ccfe4f2") : item.status === 'unsupported' ? ui("ui.unsupported_package_d72ac5f") : ui("ui.unavailable_ca18449")}</small>
       {item.downloadBytes ? <small>{ui("ui.download_7502fd3")}{' '}{(item.downloadBytes / 1024 ** 2).toFixed(1)}{' '}{ui("ui.mib_dea6cb8")}</small> : null}<small>{uiText(item.note)}</small></div>
     {['license-only', 'bundle'].includes(item.status) ? null : <button className="secondary" disabled={disabled || Boolean(pending) || (!item.access && item.status !== 'verify') || !['available', 'installed', 'verify'].includes(item.status)} onClick={() => install(item.productId)}><Download />{pending === item.productId ? ui("ui.preparing_5d1fa38") : item.status === 'verify' ? ui("ui.verify_and_install_27d773b") : item.status === 'installed' ? ui("ui.repair_1196b6c") : ui("ui.install_569ca49")}</button>}
   </article>) : <p>{ui("ui.no_related_add_ons_were_found_for_this_game_37fb940")}</p>}</div>;
@@ -1107,10 +1112,11 @@ export function DownloadsPage({ data, toast }: { data: AppSnapshot; toast: (valu
     {data.downloadProgressSupported === false ? <div className="alert amber"><CircleAlert /><span>{ui("ui.update_the_nexus_backend_in_settings_for_numeric_0385fd0")}</span></div> : null}
     {data.downloads.length === 0 ? <div className="empty-state"><div><Download /></div><h2>{ui("ui.nothing_in_the_queue_ef2b1ef")}</h2><p>{ui("ui.installations_started_from_store_will_appear_her_a8638da")}</p></div> : <div className="download-list">{ordered.map((task) => {
       const running = task.status === 'running'; const paused = task.status === 'paused'; const queued = task.status === 'queued'; const active = running || paused || queued; const failed = task.status === 'failed';
+      const pauseLabel = paused ? ui("ui.resume_download_808463a") : task.canPause ? ui("ui.pause_download_13bbded") : ui("ui.pause_is_available_while_downloading_game_files_04c9c46");
       return <article className={`download-item ${task.status}`} key={task.id}>
         <div className="download-status">{task.coverUrl ? <img className="download-cover" src={task.coverUrl} alt={ui("ui.artwork_1bf7d06", { game: task.title })} /> : running ? <LoaderCircle className="spin" /> : queued ? <Clock3 /> : paused ? <Pause /> : failed ? <CircleAlert /> : task.status === 'complete' ? <PackageCheck /> : <X />}{task.coverUrl && (running || failed) ? <span className={`download-badge ${failed ? 'failed' : ''}`}>{running ? <LoaderCircle className="spin" /> : <CircleAlert />}</span> : null}</div>
         <div className="download-main"><div className="download-heading"><div><h3>{task.kind === 'update' ? ui("ui.update_dfb8b4a", { game: task.title }) : task.title}</h3><span>{task.productId} · {task.destination}</span></div><strong>{task.progress === null ? (running ? ui("ui.active_9234069") : task.status) : `${Math.round(task.progress)}%`}</strong></div><div className={`progress-track ${task.progress === null && running ? 'indeterminate' : ''}`}><i style={task.progress !== null ? { width: `${task.progress}%` } : undefined} /></div><p className={failed ? 'error-text' : ''}>{uiText(task.error ?? task.phase)}{task.totalBytes ? ` · ${size(task.downloadedBytes ?? 0)} / ${size(task.totalBytes)}` : ''}{task.reusedBytes !== undefined ? ` · ${ui('downloads.reused_and_network',{reused:size(task.reusedBytes),network:size(task.networkBytes??0)})}` : ''}{task.transferRate ? ` · ${task.transferRate}` : ''}{running && estimateTimeRemaining(task.transferRate, task.downloadedBytes, task.totalBytes) ? ` · ${localizedTimeRemaining(estimateTimeRemaining(task.transferRate, task.downloadedBytes, task.totalBytes))}` : ''}</p>{expanded === task.id ? <pre className="task-log">{task.log.length ? task.log.join('\n') : ui("ui.xodus_has_not_emitted_text_output_yet_31c3664")}</pre> : null}</div>
-        <div className="download-actions">{active ? <>{!queued ? <button disabled={task.cancelling || !task.canPause || task.controlPending} onClick={() => pauseOrResume(task)} title={paused ? ui("ui.resume_download_808463a") : task.canPause ? ui("ui.pause_download_13bbded") : ui("ui.pause_is_available_while_downloading_game_files_04c9c46")}>{task.controlPending ? <LoaderCircle className="spin" /> : paused ? <Play /> : <Pause />}</button> : null}<button disabled={task.cancelling} onClick={() => setCancelId(task.id)} title={ui("ui.cancel_download_de5b23e")}>{task.cancelling ? <LoaderCircle className="spin" /> : <X />}</button></> : null}{failed || task.status === 'cancelled' ? <button disabled={task.cancelling || Boolean(retrying) || (task.kind === 'update' || task.kind === 'content') && data.downloads.some((entry) => ['running', 'paused', 'queued'].includes(entry.status))} onClick={() => retry(task)} title={ui("ui.retry_installation_c427806")}><RefreshCw className={retrying === task.id ? 'spin' : ''} /></button> : null}<button onClick={() => setExpanded(expanded === task.id ? undefined : task.id)} title={ui("ui.show_log_34b6683")}><Terminal /></button><button onClick={() => window.launcher.openPath(task.destination)} title={ui("ui.open_folder_6a90840")}><FolderOpen /></button>{!active ? <button disabled={task.cancelling} onClick={() => remove(task.id)} title={ui("ui.remove_from_queue_c0b9d9e")}><Trash2 /></button> : null}</div>
+        <div className="download-actions">{active ? <>{!queued ? <button disabled={task.cancelling || !task.canPause || task.controlPending} onClick={() => pauseOrResume(task)} aria-label={pauseLabel} data-tooltip={pauseLabel}>{task.controlPending ? <LoaderCircle className="spin" /> : paused ? <Play /> : <Pause />}</button> : null}<button disabled={task.cancelling} onClick={() => setCancelId(task.id)} aria-label={ui("ui.cancel_download_de5b23e")} data-tooltip={ui("ui.cancel_download_de5b23e")}>{task.cancelling ? <LoaderCircle className="spin" /> : <X />}</button></> : null}{failed || task.status === 'cancelled' ? <button disabled={task.cancelling || Boolean(retrying) || (task.kind === 'update' || task.kind === 'content') && data.downloads.some((entry) => ['running', 'paused', 'queued'].includes(entry.status))} onClick={() => retry(task)} aria-label={ui("ui.retry_installation_c427806")} data-tooltip={ui("ui.retry_installation_c427806")}><RefreshCw className={retrying === task.id ? 'spin' : ''} /></button> : null}<button onClick={() => setExpanded(expanded === task.id ? undefined : task.id)} aria-label={ui("ui.show_log_34b6683")} data-tooltip={ui("ui.show_log_34b6683")}><Terminal /></button><button onClick={() => window.launcher.openPath(task.destination)} aria-label={ui("ui.open_folder_6a90840")} data-tooltip={ui("ui.open_folder_6a90840")}><FolderOpen /></button>{!active ? <button disabled={task.cancelling} onClick={() => remove(task.id)} aria-label={ui("ui.remove_from_queue_c0b9d9e")} data-tooltip={ui("ui.remove_from_queue_c0b9d9e")}><Trash2 /></button> : null}</div>
       </article>;
     })}</div>}
     {cancelTask ? <DownloadCancelDialog task={cancelTask} options={cancelOptions} loading={checkingCancel} busy={cancelling || Boolean(cancelTask.cancelling)} error={cancelError} close={() => setCancelId(undefined)} choose={mode => { void cancel(mode); }} /> : null}
@@ -1214,7 +1220,7 @@ export function SettingsPage({ data, toast }: { data: AppSnapshot; toast: (value
           await invoke('update-check', () => window.launcher.checkLauncherUpdate(), ui("ui.update_check_finished_3f30d8a"));
         }}>{data.launcherUpdate?.checking ? <LoaderCircle className="spin" /> : <RefreshCw />}{ui("ui.check_for_updates_f26f327")}</button>
         {componentUpdates.action}
-        <button className="secondary" disabled={Boolean(busy)} title={ui("ui.add_nexus_with_artwork_including_while_steam_is_f7d03b8")} onClick={() => invoke('steam-launcher', () => window.launcher.addToSteam(), ui("ui.nexus_added_to_steam_2f6a699"))}><Plus />{ui("ui.add_nexus_to_steam_790c35e")}</button>
+        <button className="secondary" disabled={Boolean(busy)} data-tooltip={ui("ui.add_nexus_with_artwork_including_while_steam_is_f7d03b8")} onClick={() => invoke('steam-launcher', () => window.launcher.addToSteam(), ui("ui.nexus_added_to_steam_2f6a699"))}><Plus />{ui("ui.add_nexus_to_steam_790c35e")}</button>
       </div>
       {componentUpdates.details}
     </section>
@@ -1223,13 +1229,13 @@ export function SettingsPage({ data, toast }: { data: AppSnapshot; toast: (value
       <div className="settings-heading"><AccountAvatar auth={data.auth} large license={Boolean(data.auth.player)} /><div><span className="overline">{(managingAccounts || data.auth.player) && caps.playerAccount ? ui("auth.store_account") : ui("ui.microsoft_account_90f90f6")}</span><h2>{(data.auth.player ? data.auth.username : data.auth.gamertag ?? data.auth.username) ?? (data.auth.stored === false ? ui("ui.not_signed_in_491fc91") : ui("ui.account_status_unavailable_3b97a47"))}</h2><p>{data.auth.stored === true ? ui("ui.credentials_stored_by_xodus_bca3867") : ui("ui.authentication_uses_the_original_xodus_webview_cf2dcb9")}</p></div><span className={`status-label ${data.auth.stored === true ? 'ready' : data.auth.stored === false ? 'off' : 'unknown'}`}><StatusDot tone={data.auth.stored === true ? 'green' : data.auth.stored === false ? 'red' : 'amber'} />{data.auth.stored === true ? ui("ui.stored_1afc73e") : data.auth.stored === false ? ui("ui.signed_out_db8436b") : ui("ui.unknown_2375999")}</span></div>
       <div className="account-note"><CircleAlert /><span>{uiText(data.auth.note)}</span></div>
       <KeyringSetup compact disabled={data.auth.running} />
-      <div className="button-row"><button className="primary" disabled={!caps.login || data.auth.running} onClick={() => invoke('login', () => window.launcher.login(), ui("ui.xodus_sign_in_completed_8240737"))}>{data.auth.running ? <LoaderCircle className="spin" /> : <LogIn />}{data.auth.stored ? ui("ui.sign_in_again_51fbe1d") : ui("ui.sign_in_with_xodus_252572f")}</button><button className="secondary" disabled={!caps.logout || data.auth.running || (data.auth.stored === false && !data.auth.player)} title={data.auth.savedAccountsEnabled === true ? ui("auth.sign_out_active_help") : caps.savedAccounts && data.auth.savedAccountsEnabled === undefined ? ui("auth.sign_out_unknown_help") : ui("ui.remove_saved_sign_in_credentials_and_local_devic_6485324")} onClick={() => invoke('logout', () => window.launcher.logout(), data.auth.savedAccountsEnabled === true ? ui("auth.active_signed_out") : caps.savedAccounts && data.auth.savedAccountsEnabled === undefined ? ui("auth.active_signed_out_unknown") : ui("ui.saved_sign_in_credentials_and_local_device_regis_c9738bd"))}>{data.auth.player ? ui("auth.sign_out_all") : ui("ui.sign_out_48f0d3d")}</button><button className="secondary" disabled={!caps.account || data.auth.running} onClick={() => invoke('account', () => window.launcher.refreshAccount())}><RefreshCw />{ui("ui.refresh_status_442c4b8")}</button></div>
+      <div className="button-row"><button className="primary" disabled={!caps.login || data.auth.running} onClick={() => invoke('login', () => window.launcher.login(), ui("ui.xodus_sign_in_completed_8240737"))}>{data.auth.running ? <LoaderCircle className="spin" /> : <LogIn />}{data.auth.stored ? ui("ui.sign_in_again_51fbe1d") : ui("ui.sign_in_with_xodus_252572f")}</button><button className="secondary" disabled={!caps.logout || data.auth.running || (data.auth.stored === false && !data.auth.player)} data-tooltip={data.auth.savedAccountsEnabled === true ? ui("auth.sign_out_active_help") : caps.savedAccounts && data.auth.savedAccountsEnabled === undefined ? ui("auth.sign_out_unknown_help") : ui("ui.remove_saved_sign_in_credentials_and_local_devic_6485324")} onClick={() => invoke('logout', () => window.launcher.logout(), data.auth.savedAccountsEnabled === true ? ui("auth.active_signed_out") : caps.savedAccounts && data.auth.savedAccountsEnabled === undefined ? ui("auth.active_signed_out_unknown") : ui("ui.saved_sign_in_credentials_and_local_device_regis_c9738bd"))}>{data.auth.player ? ui("auth.sign_out_all") : ui("ui.sign_out_48f0d3d")}</button><button className="secondary" disabled={!caps.account || data.auth.running} onClick={() => invoke('account', () => window.launcher.refreshAccount())}><RefreshCw />{ui("ui.refresh_status_442c4b8")}</button></div>
       {!managingAccounts && data.auth.player ? <p className="fine-print account-player-summary">{ui("auth.active_player", { name: data.auth.player })}</p> : null}
       {managingAccounts || caps.savedAccounts ? <div className="button-row account-management-row"><button className="secondary" aria-expanded={managingAccounts} disabled={Boolean(busy) || data.auth.running} onClick={() => invoke('account-management', () => showAccountManagement(!managingAccounts))}>{managingAccounts ? ui("auth.hide_management") : ui("auth.manage_multiple")}</button></div> : null}
       {managingAccounts && (data.auth.saved?.length ?? 0) > 0 && caps.savedAccounts ? <div className="saved-accounts" role="list" aria-label={ui("ui.saved_store_accounts_a1c4e72")}>
       <span className="overline">{ui("ui.saved_store_accounts_a1c4e72")}</span>
       {data.auth.saved!.map(name => <div key={name} className="button-row" role="listitem">
-        <strong title={name}>{name}</strong>
+        <strong data-tooltip={name}>{name}</strong>
         {name === data.auth.username ? <span className="status-label ready">{ui("ui.account_in_use_5b09d3f")}</span>
           : <button className="secondary" disabled={data.auth.running} onClick={() => invoke('use-account', () => window.launcher.useAccount(name), ui("ui.account_switched_6a2e91c"))}>{ui("ui.use_this_account_e71c0a8")}</button>}
         <button className="secondary" disabled={data.auth.running || data.auth.stored === null} onClick={() => invoke('forget-account', () => window.launcher.forgetAccount(name), ui("ui.account_forgotten_c05d7e3"))}>{ui("ui.forget_account_3d8f6b1")}</button>
@@ -1351,7 +1357,7 @@ export function FirstRunWizard({ data, toast }: { data: AppSnapshot; toast: (val
         </div>
       </section>
       <p>{ui("ui.choose_where_games_install_everything_else_can_b_5cfa4a3")}</p>
-      <label className="wizard-field">{ui("ui.games_folder_4253203")}<div className="input-action"><input data-gamepad-initial value={installRoot} onChange={(event) => setInstallRoot(event.target.value)} /><button onClick={() => void browse()} title={ui("ui.browse_3227aa9")}><FolderOpen /></button></div>
+      <label className="wizard-field">{ui("ui.games_folder_4253203")}<div className="input-action"><input data-gamepad-initial value={installRoot} onChange={(event) => setInstallRoot(event.target.value)} /><button onClick={() => void browse()} aria-label={ui("ui.browse_3227aa9")} data-tooltip={ui("ui.browse_3227aa9")}><FolderOpen /></button></div>
         <small>{ui("ui.new_games_download_and_extract_into_this_folder_a8af21b")}</small>
       </label>
       <KeyringSetup compact disabled={signingIn || data.auth.running || data.backend.updating || installingBackend} />

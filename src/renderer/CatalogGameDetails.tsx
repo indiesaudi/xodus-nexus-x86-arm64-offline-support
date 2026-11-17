@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useMemo,useRef,useState} from 'react';
 import {Download,FolderOpen,LoaderCircle,Play} from 'lucide-react';
 import type {AppSnapshot,CatalogProduct} from '../shared/types';
 import {GameDetails} from './GameDetails';
@@ -37,7 +37,11 @@ export function publicStorePrice(product:Pick<CatalogProduct,'purchasePrice'>):s
 
 export function CatalogGameDetails({product,data,back,backLabel,toast,storeAccess,storeMode=false}:{product:CatalogProduct;storeMode?:boolean;storeAccess?:ReturnType<typeof useStoreAccess>;data:AppSnapshot;back:()=>void;backLabel?:string;toast:(value:{kind:'success'|'error';message:string})=>void}){
  const startInstall=usePackageInstall();
- const localAccess=useStoreAccess(data,storeMode&&!storeAccess),access=storeAccess??localAccess,licensed=!storeMode||access.canInstall(product);
+ const requested=useMemo(()=>[product],[product]);
+ const localAccess=useStoreAccess(data,storeMode&&!storeAccess,requested),access=storeAccess??localAccess;
+ // Direct verified access installs; an exact game child of a currently owned
+ // bundle may only ask Xodus to verify and install, never claim ownership.
+ const eligibility=storeMode?access.eligibility(product):(access.eligible(product)?'owned':undefined),licensed=!storeMode||eligibility!==undefined;
  const [destination,setDestination]=useState(()=>{
   const folder=product.title.normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-+|-+$/g,'').slice(0,80)||product.productId;
   return `${data.settings.installRoot.replace(/\/+$/,'')}/${folder}`;
@@ -58,6 +62,7 @@ export function CatalogGameDetails({product,data,back,backLabel,toast,storeAcces
   return()=>{live=false;};
  },[sizeEligible,product.productId,scope]);
  const disabled=Boolean(installed)||!licensed||queued||busy||product.installability!=='supported'||!data.backend.capabilities.streaming;
+ const verify=eligibility==='verify';
  const identity=useRef(scope);identity.current=scope;
  useEffect(()=>{identity.current=scope;return()=>{identity.current='';};},[scope]);
  async function install(){
@@ -65,7 +70,7 @@ export function CatalogGameDetails({product,data,back,backLabel,toast,storeAcces
   pending.current=true;setBusy(true);
   try{
    const request=storeMode?{...catalogInstallRequest(product,destination),source:'store' as const}:catalogInstallRequest(product,destination);
-   if(await startInstall(request,()=>identity.current===scope&&(!storeMode||access.canInstall(product)))&&identity.current===scope)toast({kind:'success',message:ui('ui.added_to_install_queue_c755bb7',{game:product.title})});
+   if(await startInstall(request,()=>identity.current===scope&&(!storeMode||access.eligible(product)))&&identity.current===scope)toast({kind:'success',message:ui('ui.added_to_install_queue_c755bb7',{game:product.title})});
   }catch(error){if(identity.current===scope)toast({kind:'error',message:error instanceof Error?error.message:String(error)});}
   finally{pending.current=false;setBusy(false);}
  }
@@ -83,7 +88,7 @@ export function CatalogGameDetails({product,data,back,backLabel,toast,storeAcces
    if(value&&identity.current===scope)setDestination(value);
   }catch(error){if(identity.current===scope)toast({kind:'error',message:error instanceof Error?error.message:String(error)});}
  }
- const button=installed?<button className="primary" data-gamepad-play disabled={playDisabled} onClick={()=>void play()}>{busy?<LoaderCircle className="spin"/>:<Play fill="currentColor"/>}{ui('ui.play_436e610')}</button>:licensed?<button className="primary" data-gamepad-play disabled={disabled||!destination.trim()} onClick={()=>void install()}>{busy?<LoaderCircle className="spin"/>:<Download/>}{queued?ui('ui.in_install_queue_7c818f2'):busy?ui('ui.preparing_5d1fa38'):ui('ui.install_569ca49')}</button>:null;
+ const button=installed?<button className="primary" data-gamepad-play disabled={playDisabled} onClick={()=>void play()}>{busy?<LoaderCircle className="spin"/>:<Play fill="currentColor"/>}{ui('ui.play_436e610')}</button>:licensed?<button className="primary" data-gamepad-play disabled={disabled||!destination.trim()} onClick={()=>void install()}>{busy?<LoaderCircle className="spin"/>:<Download/>}{queued?ui('ui.in_install_queue_7c818f2'):busy?ui('ui.preparing_5d1fa38'):verify?ui('ui.verify_and_install_27d773b'):ui('ui.install_569ca49')}</button>:null;
  return <GameDetails key={installed?.id??product.productId} game={installed??{id:'catalog:'+product.productId,title:product.title,publisher:product.publisher,heroUrl:product.heroUrl,coverUrl:product.posterUrl}}
   detailId={product.productId} catalogProductId={installed?undefined:product.productId} publicMetadataProductId={storeMode?product.productId:undefined} data={data} back={back} backLabel={backLabel} play={<>{button}<button className="secondary" onClick={()=>window.open(product.storeUrl??`https://www.xbox.com/games/store/p/${product.productId}`,'_blank')}>{ui('ui.store_page_9c667df')}</button></>}
   notices={!installed?<section className="gd-install-options">{licensed&&product.supportNote!==DIRECT_PACKAGE_SUPPORT_NOTE?<p className={product.installability==='supported'?'supported':'unsupported'}>{uiText(product.supportNote)}</p>:null}

@@ -49,7 +49,8 @@ import { applyOfflinePermissions, assertOfflineAccessReady, bindOfflineAccess, l
 import { CatalogService } from './catalog.js';
 import {readXboxProfileGames} from './xbox-profile-games.js';
 import {catalogDetailMarket, publicStoreMarket} from './public-store-market.js';
-import {assertStoreOfferAccess} from './catalog-access.js';
+import {assertStoreBundleAccess,assertStoreOfferAccess} from './catalog-access.js';
+import {requestedProductIds,scopedStoreAccess} from './store-bundle-access.js';
 import { cloudSaveRuntime, gameInviteRuntime, offlineIdentityRuntime, selectedWinePath, startXodusService, storeContentRuntime, storeDiscoveryRuntime, unbridgedCloudSaveRuntime, type XodusServiceSession } from './xodus-service.js';
 import { GameLogReducer, gameLoggingEnvironment, gameWindowEnvironment } from './game-log.js';
 import { downloadVerifiedVcRedist, installedVcRuntimeVersion, VC_REDIST_VERSION, vcOperationEnvironment, versionAtLeast } from './vc-runtime.js';
@@ -861,17 +862,38 @@ function requestSavedAccount(action: 'use' | 'forget' | 'enable', name: unknown,
   return job;
 }
 
-async function storeAccess() {
+/** Live account/backend/market identity; compared after every awaited proof. */
+function storeAccessContext(){return {account:authState.username,backend:backend.current.binaryPath,market:currentMarket()};}
+function assertStoreAccessContext(context:{account?:string;backend?:string;market:string}) {
+  if(authState.running||authState.stored!==true||context.account!==authState.username||context.backend!==backend.current.binaryPath||context.market!==currentMarket())
+    throw Error('Store account changed. Refresh account access.');
+}
+async function storeAccess(requested?:string[]) {
   if(authState.running||authState.stored!==true||!authState.username)throw Error('Sign in before checking Store access.');
   const account=authState.username,binary=backend.current.binaryPath,market=currentMarket(),configuredMarket=store.settings.market;
   accountLibrary.select(account,backend.current.capabilities.library?binary:undefined,market);
-  const result=await accountLibrary.storeAccess(configuredMarket);
+  // Bundle membership is derived in the main process for exactly the requested
+  // products, from public metadata; it never adds ownership to the map. Owned
+  // sources are taken from the fresh snapshot passed to the callback (never a
+  // pre-load peek), and the whole graph read stays inside that snapshot.
+  const ids=requestedProductIds(requested);
+  const result=await accountLibrary.storeAccess(configuredMarket,
+    ids.length?(access,wanted)=>scopedStoreAccess(access,wanted,(scope,scopedMarket)=>catalog.bundleScope(scope,Object.keys(access.accessByProductId).filter(id=>access.accessByProductId[id]==='owned'),scopedMarket)):undefined,ids);
   if(authState.running||authState.stored!==true||account!==authState.username||binary!==backend.current.binaryPath||market!==currentMarket()||configuredMarket!==store.settings.market)throw Error('Store account changed. Refresh account access.');
   return result;
 }
+/** Direct verified Store access, or (for one exact game child of a currently
+ * OWNED bundle) eligibility for the genuine backend license check. Exact
+ * direct access is decided from current evidence alone, so an unavailable
+ * public catalog can never block an existing Store installation. The scoped
+ * read is the only metadata await and stays inside the account-library
+ * snapshot; the assertion context is read again after it. */
 async function verifyStoreInstall(productId:string) {
-  const access=await storeAccess();
-  assertStoreOfferAccess(access,productId,{account:authState.username,backend:backend.current.binaryPath,market:currentMarket()});
+  const context=storeAccessContext();
+  const access=await storeAccess([productId]);
+  if(['owned','gamepass'].includes(access.accessByProductId[productId]??''))assertStoreOfferAccess(access,productId,context);
+  else assertStoreBundleAccess(access,productId,context);
+  assertStoreAccessContext(context);
 }
 
 async function startInstall(request: InstallRequest, updateGame?: Game, resumed?: DownloadTask): Promise<string> {
@@ -994,6 +1016,8 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
     if (shutdownStarted) throw Error('The launcher is closing.');
     if (identity !== `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`) throw Error('Account, backend or Store market changed. Retry the installation.');
     if(request.source==='store')await verifyStoreInstall(productId);
+    // Every awaited proof above must still belong to the captured queue identity.
+    if (identity !== `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`) throw Error('Account, backend or Store market changed. Retry the installation.');
     if (await backend.externalDownloadRunning()) throw Error('Another Xodus download is running outside this queue.');
     await assertInstallDestination(destination, store.games.filter(game => game.id !== updateGame?.id && game.id !== content?.game.id).map(game => game.path));
     if (gameOperation && ['preparing', 'running', 'stopping'].includes(gameOperation.status)) {
@@ -2117,7 +2141,7 @@ function registerIpc(): void {
   ipcMain.handle('catalog-search', (_event, query: string, cursor?: string) => {
     return catalog.search(query, publicStoreMarket(), cursor);
   });
-  ipcMain.handle('store-access', () => storeAccess());
+  ipcMain.handle('store-access', (_event, requested?: unknown) => storeAccess(requested as string[] | undefined));
   ipcMain.handle('account-library', (_event, kind: 'all' | 'owned' | 'gamepass' | 'other', cursor?: string, refresh = false, sort?: 'recent-gamepass') => {
     if (authState.running || authState.stored !== true) throw Error('Finish signing in before loading account games.');
     accountLibrary.select(authState.username, backend.current.capabilities.library ? backend.current.binaryPath : undefined, currentMarket());
@@ -2550,10 +2574,15 @@ async function createWindow(): Promise<void> {
   const demoCaptureDir = process.env.XODUS_DEMO_CAPTURE_DIR;
   if (demoCaptureDir && !demoMode) throw new Error('Demo capture requires XODUS_DEMO=1; real account data must not be captured.');
   const hiddenCapture = Boolean(smokeScreenshot || demoCaptureDir);
+  // Gamescope Gaming Mode has no desktop window manager or native menu. Use a
+  // true fullscreen window there, but never for hidden capture runs and never
+  // on a desktop session that merely carries a Steam shortcut environment.
+  const gamingMode = !hiddenCapture && process.platform === 'linux' && !nativeDialogsAvailable();
   // The compositor places unpositioned windows, which under Xwayland often
   // means the wrong monitor (see issue #5). Restore the last user placement
   // when it is still on a connected display, otherwise center on the primary.
-  const windowState = hiddenCapture ? undefined : readWindowState();
+  // Gaming Mode must not read desktop placement, and must not save over it.
+  const windowState = hiddenCapture || gamingMode ? undefined : readWindowState();
   const bounds = windowState && restoredBoundsOnScreen(windowState)
     ? windowState
     : { x: undefined as number | undefined, y: undefined as number | undefined,
@@ -2583,6 +2612,7 @@ async function createWindow(): Promise<void> {
     title: launcherDisplayName,
     icon: fileURLToPath(new URL('../../assets/icon.png', import.meta.url)),
     autoHideMenuBar: true,
+    fullscreen: gamingMode,
     show: !hiddenCapture,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.cjs'),
@@ -2592,11 +2622,16 @@ async function createWindow(): Promise<void> {
       offscreen: hiddenCapture,
     },
   });
+  if (gamingMode) {
+    // Remove the Electron File/Edit menu and its Alt accelerator entirely.
+    mainWindow.setMenu(null);
+    mainWindow.setMenuBarVisibility(false);
+  }
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => console.error('Renderer load failed', code, description));
   mainWindow.webContents.on('render-process-gone', (_event, details) => console.error('Renderer process exited', details.reason));
   if (smokeScreenshot) mainWindow.webContents.on('console-message', (_event, level, message) => console.error(`Renderer console [${level}]`, message));
   if (!hiddenCapture) mainWindow.once('ready-to-show', () => mainWindow?.show());
-  if (!hiddenCapture) {
+  if (!hiddenCapture && !gamingMode) {
     if (windowState?.maximized || tooLarge) mainWindow.maximize();
     mainWindow.on('close', () => { if (mainWindow) saveWindowState(mainWindow); });
   }

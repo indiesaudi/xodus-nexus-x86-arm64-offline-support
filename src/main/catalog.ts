@@ -1,5 +1,6 @@
 import type { CatalogProduct, CatalogSearchResult, GameStoreDetails } from '../shared/types.js';
 import {catalogXboxTitleId} from './game-details-target.js';
+import {bundleHints, bundleRoot} from './store-bundle-access.js';
 
 type Fetcher = typeof fetch;
 
@@ -561,6 +562,63 @@ export class CatalogService {
       return row && row.title !== id ? [row] : [];
     });
     return parseCatalogProducts({ productsList: rows }, catalog, 'store');
+  }
+
+  /**
+   * Raw public metadata for one bounded, explicitly requested scope. The
+   * requested products are fetched first; their public `Bundle` reverse
+   * relations only seed which currently owned products are relevant sources.
+   * Only those owned candidates are expanded forward (bounded, cycle-safe) so
+   * unrelated library rights are never traversed. Membership is decided by
+   * `bundleMembership`; nothing here is a license.
+   */
+  async bundleScope(ids: string[], ownedIds: string[], rawMarket: string): Promise<Record<string, unknown>[]> {
+    if (ids.length > 32 || ownedIds.length > 10_000 || [...ids, ...ownedIds].some(id => !/^[A-Z0-9]{12}$/.test(id)))
+      throw Error('Invalid Store bundle scope.');
+    const market = normalizeMarket(rawMarket);
+    const details = new Map<string, Record<string, unknown>>(), fetched = new Set<string>();
+    const owned = new Set(ownedIds);
+    const load = async (batch: string[]) => {
+      const pending = batch.filter(id => !fetched.has(id));
+      if (!pending.length) return;
+      let products: Record<string, unknown>[];
+      try { products = await this.fetchDetails(pending, market); }
+      catch { throw Error('Microsoft Store bundle details could not be loaded. Check your connection and retry.'); }
+      for (const product of products) details.set(string(product.ProductId)!.toUpperCase(), product);
+      for (const id of pending) fetched.add(id);
+    };
+    const wanted = [...new Set(ids)];
+    for (let offset = 0; offset < wanted.length; offset += 25) await load(wanted.slice(offset, offset + 25));
+    // Public reverse relations are discovery hints only, filtered by current ownership.
+    const hinted = [...new Set(wanted.flatMap(id => bundleHints(details.get(id))))]
+      .filter(id => owned.has(id) && !details.has(id));
+    for (let offset = 0; offset < hinted.length; offset += 25) await load(hinted.slice(offset, offset + 25));
+    // Hinted owned candidates come first; an owned product with no public
+    // metadata is simply not a candidate, never a guessed one.
+    const roots = [...new Set([...hinted, ...ownedIds])]
+      .filter(id => details.has(id) && bundleRoot(details.get(id))).slice(0, 32);
+    const seen = roots.map(root => new Set([root]));
+    let frontiers = roots.map(root => [root]);
+    for (let depth = 0; depth <= 6 && frontiers.some(frontier => frontier.length); depth++) {
+      const pending = [...new Set(frontiers.flat())].filter(id => !fetched.has(id));
+      for (let offset = 0; offset < pending.length; offset += 25) await load(pending.slice(offset, offset + 25));
+      frontiers = frontiers.map((frontier, root) => {
+        const next: string[] = [];
+        if (depth === 6) return next;
+        for (const id of frontier) {
+          const product = details.get(id);
+          if (!product || directPackageSupport(product)) continue;
+          for (const child of bundleReferences(product)) {
+            if (seen[root].size >= 48) break;
+            if (!seen[root].has(child.productId)) { seen[root].add(child.productId); next.push(child.productId); }
+          }
+        }
+        return next;
+      });
+    }
+    // Intermediate nodes stay available to the path validator; unrelated
+    // fetched nodes are never returned.
+    return [...details.values()];
   }
 
   private async fetchDetails(batch: string[], market: string): Promise<Record<string, unknown>[]> {

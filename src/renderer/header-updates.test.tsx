@@ -45,7 +45,7 @@ it('keeps backend failures on the existing Settings surface instead of claiming 
 it('opens Settings from a genuine backend update',async()=>{
   data.backend.releaseAvailable=true;data.backend.updateAvailable=true;data.backend.releaseVersion='0.5.2';
   await render(data);
-  expect(action()?.getAttribute('title')).toContain('Backend 0.5.2');
+  expect(action()?.getAttribute('data-tooltip')).toContain('Backend 0.5.2');
   await click(action());expect(go).toHaveBeenCalledTimes(1);expect(go).toHaveBeenCalledWith('settings');
 });
 
@@ -53,14 +53,14 @@ it('opens Settings from a newer launcher release and ignores a non-newer latestV
   data.launcherUpdate={currentVersion:'0.4.2',checking:false,checkedAt:'today',latestVersion:'0.4.2'};
   await render(data);expect(action()).toBeNull();
   data.launcherUpdate={...data.launcherUpdate,latestVersion:'0.4.3'};await render(data);
-  expect(action()?.getAttribute('title')).toContain('Launcher 0.4.3');
+  expect(action()?.getAttribute('data-tooltip')).toContain('Launcher 0.4.3');
   await click(action());expect(go).toHaveBeenCalledTimes(1);expect(go).toHaveBeenCalledWith('settings');
 });
 
 it('advertises one installed Standard runtime family and dedupes the default Standard notice',async()=>{
   legacyStandard(data);data.runtime.managedFamilies=[managedStandard];
   await render(data);
-  const title=action()?.getAttribute('title')??'';
+  const title=action()?.getAttribute('data-tooltip')??'';
   expect(title).toContain('Runtime Standard 11.0');
   expect(title).not.toContain('Runtime 11.0-new');
   expect((title.match(/Runtime /g)??[])).toHaveLength(1);
@@ -70,7 +70,7 @@ it('advertises one installed Standard runtime family and dedupes the default Sta
 it('opens Settings for an installed managed CachyOS update',async()=>{
   data.runtime.managedFamilies=[managedCachyos];
   await render(data);
-  expect(action()?.getAttribute('title')).toContain('Runtime CachyOS 11.0');
+  expect(action()?.getAttribute('data-tooltip')).toContain('Runtime CachyOS 11.0');
   await click(action());expect(go).toHaveBeenCalledTimes(1);expect(go).toHaveBeenCalledWith('settings');
 });
 
@@ -88,7 +88,7 @@ it('keeps a pending launcher restart actionable without a latestVersion',async()
   data.backend.releaseAvailable=true;data.backend.updateAvailable=true;data.backend.releaseVersion='0.5.2';
   await render(data);
   expect(action()?.textContent).toContain('Restart available');
-  expect(action()?.getAttribute('title')).toContain('Restart to finish launcher update.');
+  expect(action()?.getAttribute('data-tooltip')).toContain('Restart to finish launcher update.');
   await click(action());expect(go).toHaveBeenCalledTimes(1);expect(go).toHaveBeenCalledWith('settings');
 });
 

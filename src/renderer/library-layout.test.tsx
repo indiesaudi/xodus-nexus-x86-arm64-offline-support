@@ -66,7 +66,7 @@ it('keeps incomplete imports identifiable even while their drawer is closed', ()
   data.games[0].installMessage = 'Sample incomplete installation';
   const html = render(data);
   expect(html).not.toContain('class="game-detail"');
-  expect(html).toContain('title="Sample incomplete installation"');
+  expect(html).toContain('data-tooltip="Sample incomplete installation"');
   expect(html).toContain('Incomplete</span>');
 });
 

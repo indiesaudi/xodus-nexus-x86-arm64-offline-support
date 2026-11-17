@@ -134,9 +134,9 @@ function XboxChatView({api,account,xuid,displayName,close,popOut,openProfile,act
    <button type="button" className="social-chat-identity" style={{padding:0,width:'auto',flex:1,minWidth:0}} disabled={!openProfile} onClick={()=>openProfile?.(xuid)} aria-label={'View profile for '+name}>
     <XboxAvatar src={state.profile?.avatarUrl} name={name}/><span><strong><XboxGamertag name={name}/></strong><small>{ui("social.xbox_chat_ed1ef2")}</small></span>
    </button>
-   <button type="button" className="social-circle-button" disabled={state.loading||state.sending} onClick={()=>void session.current?.refresh('manual')} aria-label={ui("social.refresh_conversation_889bde")} title={ui("social.refresh_conversation_889bde")}><RefreshCw/></button>
-   {popOut?<button type="button" className="social-circle-button" onClick={popOut} aria-label={ui("social.pop_out_chat_b325ca")} title={ui("social.pop_out_chat_b325ca")}><ExternalLink/></button>:null}
-   {close?<button type="button" className="social-circle-button social-close" onClick={close} aria-label={ui("social.close_chat_3b14c5")} title={ui("social.close_chat_3b14c5")}><X/></button>:null}
+   <button type="button" className="social-circle-button" disabled={state.loading||state.sending} onClick={()=>void session.current?.refresh('manual')} aria-label={ui("social.refresh_conversation_889bde")} data-tooltip={ui("social.refresh_conversation_889bde")}><RefreshCw/></button>
+   {popOut?<button type="button" className="social-circle-button" onClick={popOut} aria-label={ui("social.pop_out_chat_b325ca")} data-tooltip={ui("social.pop_out_chat_b325ca")}><ExternalLink/></button>:null}
+   {close?<button type="button" className="social-circle-button social-close" onClick={close} aria-label={ui("social.close_chat_3b14c5")} data-tooltip={ui("social.close_chat_3b14c5")}><X/></button>:null}
   </header>
   <div className="social-messages" role="log" aria-label={'Messages with '+name} aria-live="polite" aria-relevant="additions text" aria-busy={state.loading} ref={list}
    onScroll={observe}>

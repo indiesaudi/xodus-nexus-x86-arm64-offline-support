@@ -109,3 +109,18 @@ it('offers Resume and Cancel for paused downloads, without treating them as fini
   expect(html).not.toContain('Clear finished'); expect(html).not.toContain('Remove from queue');
   expect(html).not.toContain('util-linux');
 });
+it('keeps accessible names on all six icon-only download actions', () => {
+  const data = demoSnapshot();
+  data.downloads = [
+    { id:'paused', title:'Paused game', destination:'/tmp/demo', productId:'TEST', status:'paused',
+      canPause:true, progress:25, phase:'Paused', log:[], startedAt:'today' },
+    { id:'running', title:'Running game', destination:'/tmp/running', productId:'TEST3', status:'running',
+      canPause:true, progress:50, phase:'Downloading', log:[], startedAt:'today' },
+    { id:'failed', title:'Failed game', destination:'/tmp/failed', productId:'TEST2', status:'failed',
+      canPause:false, progress:0, phase:'Failed', log:[], startedAt:'today' },
+  ];
+  const html = renderToStaticMarkup(<DownloadsPage data={data} toast={() => {}} />);
+  for (const label of ['Resume download', 'Pause download', 'Cancel download', 'Retry installation', 'Show log', 'Open folder', 'Remove from queue']) {
+    expect(html).toMatch(new RegExp(`<button[^>]*aria-label="${label}"[^>]*data-tooltip="${label}"`));
+  }
+});

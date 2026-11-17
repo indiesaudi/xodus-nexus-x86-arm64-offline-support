@@ -169,7 +169,7 @@ export function XboxPeopleBrowser({api,account,friends,friendsChanged,openProfil
 
   return <div className="social-people-pane" aria-busy={busy}>
     <div className="social-page-heading"><h2>{choosingChat?'New chat':'People'}</h2>
-      <button type="button" className="social-circle-button" onClick={refresh} disabled={busy} aria-label={ui("social.refresh_xbox_people_66d233")} title={ui("social.refresh_xbox_people_66d233")}><RefreshCw/></button>
+      <button type="button" className="social-circle-button" onClick={refresh} disabled={busy} aria-label={ui("social.refresh_xbox_people_66d233")} data-tooltip={ui("social.refresh_xbox_people_66d233")}><RefreshCw/></button>
     </div>
     {!choosingChat?<label className="social-people-selector"><span className="social-sr-only">{ui("social.people_list_8dcadc")}</span>
       <select aria-label={ui("social.people_list_8dcadc")} value={list} onChange={event=>select(event.target.value as View)}>

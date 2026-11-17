@@ -59,7 +59,7 @@ export function HomeGamePassSection({shelf,loading,error,retry,open}:RecentGameP
               {product.posterUrl
                 ?<img className="game-cover cover-store" src={product.posterUrl} alt={ui('ui.artwork_1bf7d06',{game:product.title})}/>
                 :<div className="cover-placeholder"><Gamepad2/></div>}
-              <strong title={product.title}>{product.title}</strong>
+              <strong data-tooltip={product.title}>{product.title}</strong>
               <span>{product.publisher??product.productId}</span>
               <small className="gamepass-badge">{ui('ui.game_pass_5c83b40')}</small>
             </button>)}

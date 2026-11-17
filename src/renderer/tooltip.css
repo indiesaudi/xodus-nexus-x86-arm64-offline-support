@@ -1,0 +1,46 @@
+/* In-window tooltip surface. It is a fixed portal child of the document body,
+   never a native browser/Electron tooltip window. */
+.nexus-tooltip {
+  position: fixed;
+  z-index: 200;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 360px;
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 7px 10px;
+  border: 1px solid #59616b;
+  border-radius: 4px;
+  background: #20242a;
+  color: #f5f5f5;
+  box-shadow: 0 6px 18px #0008;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: start;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  pointer-events: none;
+  cursor: default;
+}
+
+/* Only a tooltip that actually needs vertical scrolling may capture pointer
+   input, so ordinary help text never blocks the control underneath it. */
+.nexus-tooltip[data-scrollable="true"] {
+  pointer-events: auto;
+}
+
+/* At extreme viewport sizes the normal padding and border alone exceed the
+   available box. Remove that chrome rather than paint outside the viewport. */
+@media (max-width: 40px), (max-height: 40px) {
+  .nexus-tooltip,
+  .nexus-tooltip[data-scrollable="true"] {
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+}
