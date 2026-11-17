@@ -26,7 +26,7 @@ Browse the Store, install games you own or can access through a subscription,
 and play with a managed runtime family. Xbox sign-in and cloud saves are available
 for supported games.
 
-![Nexus Launcher demo](docs/screenshots/demo.gif?v=dc773ded)
+![Nexus Launcher demo](docs/screenshots/demo.gif?v=3db50803)
 
 ## Community translations
 
@@ -181,8 +181,8 @@ not confirm gameplay or online support.
 
 ## Screenshots
 
-[Library](docs/screenshots/demo-library.png) ·
-[Store](docs/screenshots/demo-store.png) ·
+[Library](docs/screenshots/demo-library.gif) ·
+[Store](docs/screenshots/demo-store.gif) ·
 [Social](docs/screenshots/demo-social.png) ·
 [Chat](docs/screenshots/demo-chat.png) ·
 [Install queue](docs/screenshots/demo-downloads.png) ·
