@@ -10,6 +10,7 @@ import {XboxSocial} from './XboxSocial';
 import {XboxOverlayChat} from './XboxOverlayChat';
 import {connectGuideEvents,guideApi,guideRpc,onGuideAuth,onGuideEvent} from './xbox-guide-api';
 import {xboxOverlaySettings} from '../shared/xbox-overlay-settings';
+import {TooltipLayer} from './Tooltip';
 import './xbox-guide.css';
 import './xbox-overlay-chat.css';
 
@@ -55,4 +56,4 @@ function XboxGameGuide(){
    openProfile={id=>{void api.openXboxPlayerProfile(id);}}/>):null}
  </main>;
 }
-createRoot(document.getElementById('root')!).render(<XboxGameGuide/>);
+createRoot(document.getElementById('root')!).render(<><XboxGameGuide/><TooltipLayer/></>);

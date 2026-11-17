@@ -17,3 +17,8 @@ it('shows the upstream distinction and Nexus-only reporting before setup and sig
   expect(html).toMatch(/<input[^>]*data-gamepad-initial/);
   expect(html).toContain('Start using Nexus Launcher');
 });
+
+it('keeps an accessible name on the wizard folder browse action', () => {
+  const html = renderToStaticMarkup(<FirstRunWizard data={demoSnapshot()} toast={() => {}} />);
+  expect(html).toMatch(/<button[^>]*aria-label="Browse"[^>]*data-tooltip="Browse"/);
+});

@@ -14,7 +14,7 @@ describe('Settings diagnostics', () => {
   });
   it('explains that explicit sign-out also removes the local device registration', () => {
     const html = renderToStaticMarkup(<SettingsPage data={demoSnapshot()} toast={() => {}} />);
-    expect(html).toContain('title="Remove saved sign-in credentials and local device registration. Games and saves are kept."');
+    expect(html).toContain('data-tooltip="Remove saved sign-in credentials and local device registration. Games and saves are kept."');
     expect(html).toContain('Sign out');
     expect(html).toContain('Sign in again');
   });

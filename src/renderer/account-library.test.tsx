@@ -45,7 +45,7 @@ it.each(['supported', 'unsupported', 'unknown'] as const)('uses the Store %s bad
   expect(badge(html)).toBe(badge(store));
   expect(html).toContain('<span>Owned</span>');
   expect(html.includes('disabled=""')).toBe(installability !== 'supported');
-  expect(html).toContain('title="Package &lt;reason&gt;"');
+  expect(html).toContain('data-tooltip="Package &lt;reason&gt;"');
   if (installability === 'unsupported') expect(html).toContain('>Unsupported</span>');
   const details=html.match(/<button[^>]*class="catalog-card-main"[^>]*>/)?.[0];
   expect(details).toContain('View details for Owned &amp; game');expect(details).not.toContain('disabled=');
@@ -94,12 +94,12 @@ it('offers Access and Play state filters without cloud streaming, preserving ins
   expect(html).not.toContain('Cloud playable'); expect(html).toContain('Installed games remain available');
   expect(html).toContain(data.games[0].title);
   expect(html).not.toContain('Owned · Installed');
-  expect(html).toContain(`title="${data.games[0].title}"`);
+  expect(html).toContain(`data-tooltip="${data.games[0].title}"`);
 });
 
-it('preserves full edition names in native hover tooltips and escapes special characters',()=>{
+it('preserves full edition names in in-window hover tooltips and escapes special characters',()=>{
   const html=renderToStaticMarkup(<GameTitle title={'A Long Game Name: "Complete" & Deluxe Edition (PC)'} />);
-  expect(html).toContain('title="A Long Game Name: &quot;Complete&quot; &amp; Deluxe Edition (PC)"');
+  expect(html).toContain('data-tooltip="A Long Game Name: &quot;Complete&quot; &amp; Deluxe Edition (PC)"');
 });
 
 it('uses Store box art instead of a package logo and wide artwork for details',()=>{
