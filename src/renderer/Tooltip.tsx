@@ -12,6 +12,7 @@ const MARGIN = 8;
 const GAP = 6;
 const MAX_WIDTH = 360;
 const HIDE_DELAY = 140;
+const OPEN_DELAY = 500;
 
 export type TooltipPlacement = 'top' | 'bottom' | 'left' | 'right';
 export type TooltipRect = {left: number; top: number; right: number; bottom: number; width: number; height: number};
@@ -95,7 +96,9 @@ export function TooltipLayer() {
   const activeRef = useRef<ActiveTooltip>();
   const dismissed = useRef<HTMLElement>();
   const hideTimer = useRef<number>();
+  const pendingOpen = useRef<{source: HTMLElement; trigger: HTMLElement; timer: number}>();
   const frame = useRef<number>();
+  const frameGeneration = useRef(0);
   const pointer = useRef({type: '', at: 0, x: 0, y: 0});
   const tooltipRef = useRef<HTMLDivElement>(null);
 
@@ -119,8 +122,16 @@ export function TooltipLayer() {
         hideTimer.current = undefined;
       }
     };
+    const cancelPointerFrame = () => {
+      frameGeneration.current += 1;
+      if (frame.current !== undefined) {
+        win.cancelAnimationFrame(frame.current);
+        frame.current = undefined;
+      }
+    };
     const hide = (dismissAnchor?: HTMLElement) => {
       cancelHide();
+      cancelPointerFrame();
       const current = activeRef.current;
       if (current) {
         restore(current);
@@ -131,13 +142,21 @@ export function TooltipLayer() {
     };
     const scheduleHide = (dismissAnchor?: HTMLElement) => {
       cancelHide();
+      cancelPointerFrame();
       hideTimer.current = win.setTimeout(() => {
         hideTimer.current = undefined;
         hide(dismissAnchor);
       }, HIDE_DELAY);
     };
-    const show = (source: HTMLElement | undefined, trigger = source) => {
-      if (!source || !trigger || !source.isConnected || !trigger.isConnected) return;
+    const cancelPending = () => {
+      cancelPointerFrame();
+      if (pendingOpen.current !== undefined) {
+        win.clearTimeout(pendingOpen.current.timer);
+        pendingOpen.current = undefined;
+      }
+    };
+    const openNow = (source: HTMLElement, trigger: HTMLElement) => {
+      if (!source.isConnected || !trigger.isConnected) return;
       if (dismissed.current && (dismissed.current === trigger || dismissed.current.contains(trigger))) return;
       const text = tooltipValue(source);
       if (!text.trim()) return;
@@ -153,6 +172,43 @@ export function TooltipLayer() {
       const next = {source, trigger, text, original, composed};
       activeRef.current = next;
       setActive(next);
+    };
+    const scheduleOpen = (source: HTMLElement | undefined, trigger = source) => {
+      cancelPointerFrame();
+      if (!source || !trigger || !source.isConnected || !trigger.isConnected) { cancelPending(); return; }
+      if (dismissed.current && (dismissed.current === trigger || dismissed.current.contains(trigger))) {
+        cancelPending();
+        return;
+      }
+      const text = tooltipValue(source);
+      if (!text.trim()) { cancelPending(); return; }
+      const current = activeRef.current;
+      if (current?.source === source && current.trigger === trigger) {
+        cancelHide();
+        cancelPending();
+        return;
+      }
+      const existing = pendingOpen.current;
+      if (existing && existing.source === source && existing.trigger === trigger) {
+        cancelHide();
+        if (current) hide();
+        return;
+      }
+      cancelPending();
+      cancelHide();
+      if (current) hide();
+      const timer = win.setTimeout(() => {
+        const waiting = pendingOpen.current;
+        if (!waiting || waiting.source !== source || waiting.trigger !== trigger) return;
+        pendingOpen.current = undefined;
+        openNow(source, trigger);
+      }, OPEN_DELAY);
+      pendingOpen.current = {source, trigger, timer};
+    };
+    const pendingContains = (node: EventTarget | null) => {
+      const element = asElement(node);
+      const waiting = pendingOpen.current;
+      return Boolean(element && waiting && (waiting.trigger.contains(element) || waiting.source.contains(element)));
     };
     const anchorContains = (node: EventTarget | null) => {
       const element = asElement(node);
@@ -189,6 +245,7 @@ export function TooltipLayer() {
       const pointerEvent = event as PointerEvent;
       if (pointerEvent.pointerType === 'touch') {
         pointer.current = {type: 'touch', at: Date.now(), x: pointerEvent.clientX, y: pointerEvent.clientY};
+        cancelPending();
         hide();
         return;
       }
@@ -196,8 +253,9 @@ export function TooltipLayer() {
       const target = asElement(event.target);
       if ((target && inLayer(target)) || overSurface(pointerEvent)) { cancelHide(); return; }
       const source = resolveTooltipAnchor(target ?? null);
-      if (source) { show(source, triggerFor(target ?? null, source)); return; }
-      if (target && anchorContains(target)) { cancelHide(); return; }
+      if (source) { scheduleOpen(source, triggerFor(target ?? null, source)); return; }
+      if (target && (pendingContains(target) || anchorContains(target))) { cancelHide(); return; }
+      cancelPending();
       if (!keepForFocus()) scheduleHide();
     };
     const onPointerOut = (event: Event) => {
@@ -205,6 +263,9 @@ export function TooltipLayer() {
       if (pointerEvent.pointerType === 'touch') return;
       const target = asElement(event.target);
       const related = asElement((event as MouseEvent).relatedTarget);
+      const waiting = pendingOpen.current;
+      if (waiting && target && (waiting.trigger.contains(target) || waiting.source.contains(target))
+        && (!related || (!waiting.trigger.contains(related) && !waiting.source.contains(related)))) cancelPending();
       const dismissedAnchor = dismissed.current;
       if (dismissedAnchor && target && (target === dismissedAnchor || dismissedAnchor.contains(target))
         && (!related || !dismissedAnchor.contains(related))) dismissed.current = undefined;
@@ -227,14 +288,18 @@ export function TooltipLayer() {
       pointer.current = {type: pointerEvent.pointerType || 'mouse', at: Date.now(), x: pointerEvent.clientX, y: pointerEvent.clientY};
       if (overSurface(pointerEvent)) { cancelHide(); return; }
       if (frame.current !== undefined) return;
+      const generation = ++frameGeneration.current;
       frame.current = win.requestAnimationFrame(() => {
+        if (generation !== frameGeneration.current) return;
         frame.current = undefined;
         const point = pointer.current;
         if (point.type === 'touch') return;
         const element = doc.elementFromPoint?.(point.x, point.y) ?? null;
         if (element && inLayer(element)) { cancelHide(); return; }
         const source = resolveTooltipAnchor(element);
-        if (source) { show(source, triggerFor(element, source)); return; }
+        if (source) { scheduleOpen(source, triggerFor(element, source)); return; }
+        if (element && (pendingContains(element) || anchorContains(element))) { cancelHide(); return; }
+        cancelPending();
         if (keepForFocus()) { cancelHide(); return; }
         if (activeRef.current) scheduleHide();
       });
@@ -243,26 +308,35 @@ export function TooltipLayer() {
       const pointerEvent = event as PointerEvent;
       const target = asElement(event.target);
       if (target && inLayer(target)) return; // Keep a scrollable tooltip usable.
+      const waiting = pendingOpen.current;
+      const current = activeRef.current;
+      const dismissTrigger = waiting?.trigger ?? current?.trigger;
+      cancelPending();
       if (pointerEvent.pointerType === 'touch') {
         pointer.current = {type: 'touch', at: Date.now(), x: pointerEvent.clientX, y: pointerEvent.clientY};
         hide();
+        if (dismissTrigger) dismissed.current = dismissTrigger;
         return;
       }
-      const current = activeRef.current;
       if (current) hide(current.trigger);
+      if (dismissTrigger) dismissed.current = dismissTrigger;
     };
     const onFocusIn = (event: Event) => {
-      if (pointer.current.type === 'touch' && Date.now() - pointer.current.at < 1000) return;
+      if (pointer.current.type === 'touch' && Date.now() - pointer.current.at < 1000) { cancelPending(); return; }
       const target = asElement(event.target);
       const source = resolveTooltipAnchor(target ?? null);
-      if (source) { show(source, target instanceof HTMLElement ? target : source); return; }
-      if (target && anchorContains(target)) { cancelHide(); return; }
+      if (source) { scheduleOpen(source, target instanceof HTMLElement ? target : source); return; }
+      if (target && (pendingContains(target) || anchorContains(target))) { cancelHide(); return; }
+      cancelPending();
       if (activeRef.current) scheduleHide();
     };
     const onFocusOut = (event: Event) => {
       const current = activeRef.current;
       const target = asElement(event.target);
       const related = asElement((event as FocusEvent).relatedTarget);
+      const waiting = pendingOpen.current;
+      if (waiting && target && (waiting.trigger.contains(target) || waiting.source.contains(target))
+        && (!related || (!waiting.trigger.contains(related) && !waiting.source.contains(related)))) cancelPending();
       const dismissedAnchor = dismissed.current;
       if (dismissedAnchor && target && (target === dismissedAnchor || dismissedAnchor.contains(target))
         && (!related || !dismissedAnchor.contains(related))) dismissed.current = undefined;
@@ -274,21 +348,27 @@ export function TooltipLayer() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       const current = activeRef.current;
+      const waiting = pendingOpen.current;
+      const dismissTrigger = waiting?.trigger ?? current?.trigger;
+      cancelPending();
       if (current) hide(current.trigger);
+      if (dismissTrigger) dismissed.current = dismissTrigger;
     };
     const onScroll = (event: Event) => {
       const target = asElement(event.target);
       if (target && inLayer(target)) return; // Scrolling the tooltip itself is allowed.
+      cancelPending();
       const current = activeRef.current;
       if (current) hide(current.trigger);
     };
     const onResize = () => {
+      cancelPending();
       const current = activeRef.current;
       if (current) hide(current.trigger);
     };
-    const onBlur = () => hide();
-    const onVisibility = () => { if (doc.hidden) hide(); };
-    const onPointerCancel = () => hide();
+    const onBlur = () => { cancelPending(); hide(); };
+    const onVisibility = () => { if (doc.hidden) { cancelPending(); hide(); } };
+    const onPointerCancel = () => { cancelPending(); hide(); };
 
     const adoptTitle = (element: Element) => {
       if (inLayer(element)) return;
@@ -319,8 +399,10 @@ export function TooltipLayer() {
           const own = element.hasAttribute(TOOLTIP_ATTRIBUTE) && tooltipValue(element).trim() ? element : undefined;
           const source = own ?? resolveTooltipAnchor(sourceElement);
           const trigger = sourceElement instanceof HTMLElement ? sourceElement : element;
-          if (source && (activeRef.current?.source !== source || activeRef.current?.trigger !== trigger)) show(source, trigger);
+          if (source) scheduleOpen(source, trigger);
         } else {
+          const waiting = pendingOpen.current;
+          if (waiting && (waiting.trigger === element || element.contains(waiting.trigger))) cancelPending();
           const current = activeRef.current;
           if (current && (current.trigger === element || element.contains(current.trigger))) hide();
         }
@@ -329,6 +411,8 @@ export function TooltipLayer() {
     focusObserver.observe(doc.documentElement, {attributes: true, attributeFilter: ['data-gamepad-focus'], subtree: true});
 
     const disconnectObserver = new MutationObserver(records => {
+      const waiting = pendingOpen.current;
+      if (waiting && (!waiting.source.isConnected || !waiting.trigger.isConnected)) cancelPending();
       const current = activeRef.current;
       if (current && (!current.source.isConnected || !current.trigger.isConnected)) hide();
       for (const record of records) {
@@ -358,8 +442,9 @@ export function TooltipLayer() {
       titleObserver.disconnect();
       focusObserver.disconnect();
       disconnectObserver.disconnect();
+      cancelPending();
       cancelHide();
-      if (frame.current !== undefined) win.cancelAnimationFrame(frame.current);
+      cancelPointerFrame();
       doc.removeEventListener('pointerover', onPointerOver, true);
       doc.removeEventListener('pointerout', onPointerOut, true);
       doc.removeEventListener('pointermove', onPointerMove, true);

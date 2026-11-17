@@ -5,11 +5,23 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {placeTooltip, TooltipLayer, type TooltipRect} from './Tooltip';
 
+const OPEN_DELAY = 500;
+const HIDE_DELAY = 140;
+
 let root: Root;
 let originalElementFromPoint: PropertyDescriptor | undefined;
+let originalHidden: PropertyDescriptor | undefined;
 
-const wait = (ms = 0) => new Promise(resolve => setTimeout(resolve, ms));
-const actWait = async (ms = 0) => { await act(async () => { await wait(ms); }); };
+const flush = async () => {
+  await act(async () => {
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+};
+const advance = async (ms: number) => {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+};
+const open = async () => { await advance(OPEN_DELAY); };
 const render = async (node: ReactNode) => {
   await act(async () => { root.render(<>{node}<TooltipLayer/></>); });
 };
@@ -28,56 +40,75 @@ const pointer = (type: string, target: EventTarget, init: {
 const tooltip = () => document.querySelector<HTMLElement>('[role="tooltip"]');
 
 beforeEach(() => {
+  vi.useFakeTimers();
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => window.setTimeout(() => callback(performance.now()), 0));
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => window.clearTimeout(id));
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById('root')!);
   originalElementFromPoint = Object.getOwnPropertyDescriptor(document, 'elementFromPoint');
+  originalHidden = Object.getOwnPropertyDescriptor(document, 'hidden');
 });
 afterEach(async () => {
   await act(async () => { root.unmount(); });
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   if (originalElementFromPoint) Object.defineProperty(document, 'elementFromPoint', originalElementFromPoint);
   else Reflect.deleteProperty(document, 'elementFromPoint');
+  if (originalHidden) Object.defineProperty(document, 'hidden', originalHidden);
+  else Reflect.deleteProperty(document, 'hidden');
   document.body.innerHTML = '';
 });
 
 describe('in-window tooltip lifecycle', () => {
-  it('renders a fixed portal on hover, preserves the full text and restores caller descriptions', async () => {
+  it('opens on hover only after the dwell, preserves text and restores caller descriptions', async () => {
     await render(<button id="target" data-tooltip={'Full & <escaped>'} aria-describedby="existing help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { pointer('pointerover', target); });
-    const surface = tooltip();
-    expect(surface).not.toBeNull();
-    expect(surface!.textContent).toBe('Full & <escaped>');
-    expect(surface!.parentElement).toBe(document.body);
-    expect(surface!.hasAttribute('data-tooltip-layer')).toBe(true);
-    expect(target.getAttribute('aria-describedby')).toBe(`existing help ${surface!.id}`);
+    expect(tooltip()).toBeNull();
+    expect(target.getAttribute('aria-describedby')).toBe('existing help');
+    await advance(OPEN_DELAY - 1);
+    expect(tooltip()).toBeNull();
+    await advance(1);
+    const surface = tooltip()!;
+    expect(surface.textContent).toBe('Full & <escaped>');
+    expect(surface.parentElement).toBe(document.body);
+    expect(surface.hasAttribute('data-tooltip-layer')).toBe(true);
+    expect(target.getAttribute('aria-describedby')).toBe(`existing help ${surface.id}`);
     await act(async () => { pointer('pointerout', target, {relatedTarget: document.body}); });
-    await actWait(220);
+    await advance(HIDE_DELAY);
     expect(tooltip()).toBeNull();
     expect(target.getAttribute('aria-describedby')).toBe('existing help');
   });
 
-  it('shows on keyboard focus and hides on focusout', async () => {
+  it('opens on keyboard focus only after the dwell and hides on focusout', async () => {
     await render(<button id="target" data-tooltip="Focus help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { target.focus(); });
+    expect(tooltip()).toBeNull();
+    await advance(OPEN_DELAY - 1);
+    expect(tooltip()).toBeNull();
+    await advance(1);
     const surface = tooltip()!;
     expect(surface.textContent).toBe('Focus help');
     expect(target.getAttribute('aria-describedby')).toBe(surface.id);
     await act(async () => { target.blur(); });
-    await actWait(220);
+    await advance(HIDE_DELAY);
     expect(tooltip()).toBeNull();
     expect(target.hasAttribute('aria-describedby')).toBe(false);
   });
 
-  it('resolves a gamepad focus marker through the focused card control and prefers its primary title', async () => {
+  it('opens on a gamepad focus marker only after the dwell and prefers the primary child title', async () => {
     await render(<div id="card" data-gamepad-card>
       <button id="card-button"><span data-tooltip="Price includes US tax">$9.99</span><strong data-tooltip="Full game title" data-tooltip-primary="">Game</strong></button>
     </div>);
     const card = document.getElementById('card')!;
-    await act(async () => { card.setAttribute('data-gamepad-focus', ''); await wait(0); });
+    await act(async () => { card.setAttribute('data-gamepad-focus', ''); await flush(); });
+    expect(tooltip()).toBeNull();
+    await advance(OPEN_DELAY - 1);
+    expect(tooltip()).toBeNull();
+    await advance(1);
     const surface = tooltip()!;
     expect(surface.textContent).toBe('Full game title');
     expect(document.getElementById('card-button')!.getAttribute('aria-describedby')).toBe(surface.id);
@@ -89,6 +120,7 @@ describe('in-window tooltip lifecycle', () => {
     </div>);
     const button = document.getElementById('card-button')!;
     await act(async () => { button.focus(); });
+    await open();
     const surface = tooltip()!;
     expect(surface.textContent).toBe('Price includes US tax');
     expect(button.getAttribute('aria-describedby')).toBe(surface.id);
@@ -99,10 +131,11 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="target" data-tooltip="Hover help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { pointer('pointerover', target); });
+    await open();
     const surface = tooltip()!;
     await act(async () => { pointer('pointerout', target, {relatedTarget: document.body}); });
     await act(async () => { pointer('pointerover', surface); });
-    await actWait(220);
+    await advance(HIDE_DELAY + 80);
     expect(tooltip()).toBe(surface);
     await act(async () => { pointer('pointerout', surface, {relatedTarget: document.body}); });
     expect(tooltip()).toBeNull();
@@ -112,12 +145,14 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="target" data-tooltip="Hover help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { pointer('pointerover', target); });
+    await open();
     const surface = tooltip()!;
     Object.defineProperty(surface, 'getBoundingClientRect', {configurable: true, value: () => ({
       left: 200, top: 100, right: 400, bottom: 200, width: 200, height: 100, x: 200, y: 100, toJSON: () => ({}),
     } as DOMRect)});
     await act(async () => { pointer('pointerout', target, {relatedTarget: document.body}); });
-    await act(async () => { pointer('pointermove', document.body, {clientX: 300, clientY: 150}); await wait(220); });
+    await act(async () => { pointer('pointermove', document.body, {clientX: 300, clientY: 150}); });
+    await advance(HIDE_DELAY + 80);
     expect(tooltip()).toBe(surface);
   });
 
@@ -130,12 +165,15 @@ describe('in-window tooltip lifecycle', () => {
     const a = document.getElementById('child-a')!;
     const b = document.getElementById('child-b')!;
     await act(async () => { trigger.focus(); });
+    await open();
     expect(tooltip()?.textContent).toBe('Trigger help');
     await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true})); });
     expect(tooltip()).toBeNull();
     await act(async () => { pointer('pointerout', a, {relatedTarget: b}); pointer('pointerover', b); });
+    await open();
     expect(tooltip()).toBeNull();
     await act(async () => { pointer('pointerout', b, {relatedTarget: document.body}); pointer('pointerover', b); });
+    await open();
     expect(tooltip()?.textContent).toBe('Child B');
   });
 
@@ -152,15 +190,19 @@ describe('in-window tooltip lifecycle', () => {
     const b = document.getElementById('child-b') as HTMLButtonElement;
     const outside = document.getElementById('outside') as HTMLButtonElement;
     await act(async () => { trigger.focus(); });
+    await open();
     expect(tooltip()?.textContent).toBe('Trigger help');
     await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true})); });
     expect(tooltip()).toBeNull();
     await act(async () => { a.focus(); });
+    await open();
     expect(tooltip()).toBeNull();
     await act(async () => { b.focus(); });
+    await open();
     expect(tooltip()).toBeNull();
     await act(async () => { outside.focus(); });
     await act(async () => { b.focus(); });
+    await open();
     expect(tooltip()?.textContent).toBe('Child B');
   });
 
@@ -168,6 +210,7 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="target" data-tooltip="Escape help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()).not.toBeNull();
     const key = new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true});
     const other = vi.fn();
@@ -178,10 +221,12 @@ describe('in-window tooltip lifecycle', () => {
     expect(other).toHaveBeenCalledOnce();
     expect(key.defaultPrevented).toBe(false);
     await act(async () => { pointer('pointerover', target); });
+    await open();
     expect(tooltip()).toBeNull();
     await act(async () => { target.blur(); });
-    await actWait(220);
+    await advance(HIDE_DELAY);
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()?.textContent).toBe('Escape help');
   });
 
@@ -189,14 +234,16 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="target" data-tooltip="Scroll help">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { target.focus(); });
+    await open();
     const surface = tooltip()!;
     await act(async () => { surface.dispatchEvent(new Event('scroll')); });
     expect(tooltip()).toBe(surface);
     await act(async () => { window.dispatchEvent(new Event('scroll')); });
     expect(tooltip()).toBeNull();
     await act(async () => { target.blur(); });
-    await actWait(220);
+    await advance(HIDE_DELAY);
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()).not.toBeNull();
     await act(async () => { window.dispatchEvent(new Event('resize')); });
     expect(tooltip()).toBeNull();
@@ -210,23 +257,25 @@ describe('in-window tooltip lifecycle', () => {
       target.focus();
       pointer('pointerover', target, {pointerType: 'touch'});
     });
+    await open();
     expect(tooltip()).toBeNull();
   });
 
   it('removes dynamically added native title attributes before they can show', async () => {
     await render(<button id="target">Target</button>);
     const target = document.getElementById('target')!;
-    await act(async () => { target.setAttribute('title', 'Native title'); await wait(0); });
+    await act(async () => { target.setAttribute('title', 'Native title'); await flush(); });
     expect(target.hasAttribute('title')).toBe(false);
     expect(target.getAttribute('data-tooltip')).toBe('Native title');
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()?.textContent).toBe('Native title');
   });
 
   it('adopts title attributes on dynamically inserted markup', async () => {
     await render(<div id="host"></div>);
     const host = document.getElementById('host')!;
-    await act(async () => { host.innerHTML = '<button id="added" title="Inserted native">Added</button>'; await wait(0); });
+    await act(async () => { host.innerHTML = '<button id="added" title="Inserted native">Added</button>'; await flush(); });
     const added = document.getElementById('added')!;
     expect(added.hasAttribute('title')).toBe(false);
     expect(added.getAttribute('data-tooltip')).toBe('Inserted native');
@@ -236,7 +285,8 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="disabled" disabled data-tooltip="Disabled help">Disabled</button>);
     const button = document.getElementById('disabled')!;
     Object.defineProperty(document, 'elementFromPoint', {configurable: true, value: () => button});
-    await act(async () => { pointer('pointermove', document.body, {clientX: 20, clientY: 20}); await wait(60); });
+    await act(async () => { pointer('pointermove', document.body, {clientX: 20, clientY: 20}); });
+    await open();
     expect(tooltip()?.textContent).toBe('Disabled help');
   });
 
@@ -245,8 +295,11 @@ describe('in-window tooltip lifecycle', () => {
     await act(async () => { root.render(fixture(true)); });
     const target = document.getElementById('target')!;
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()).not.toBeNull();
-    await act(async () => { root.render(fixture(false)); await wait(0); });
+    await act(async () => { root.render(fixture(false)); await flush(); });
+    expect(tooltip()).toBeNull();
+    await advance(OPEN_DELAY);
     expect(tooltip()).toBeNull();
   });
 
@@ -254,11 +307,214 @@ describe('in-window tooltip lifecycle', () => {
     await render(<button id="target" data-tooltip="Cleanup help" aria-describedby="caller">Target</button>);
     const target = document.getElementById('target')!;
     await act(async () => { target.focus(); });
+    await open();
     expect(tooltip()).not.toBeNull();
     await act(async () => { root.unmount(); });
     expect(tooltip()).toBeNull();
     expect(target.getAttribute('aria-describedby')).toBe('caller');
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
     root = createRoot(document.getElementById('root')!);
+  });
+
+  it('cancels a pending hover open when the pointer leaves before the deadline', async () => {
+    await render(<button id="target" data-tooltip="Hover help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { pointer('pointerout', target, {relatedTarget: document.body}); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('cancels a pending focus open when focus leaves before the deadline', async () => {
+    await render(<button id="target" data-tooltip="Focus help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { target.focus(); });
+    await advance(300);
+    await act(async () => { target.blur(); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('cancels a pending open on pointerdown', async () => {
+    await render(<button id="target" data-tooltip="Pointer help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { pointer('pointerdown', target); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it.each([
+    ['scroll', () => window.dispatchEvent(new Event('scroll'))],
+    ['resize', () => window.dispatchEvent(new Event('resize'))],
+    ['blur', () => window.dispatchEvent(new Event('blur'))],
+  ])('cancels a pending open on %s', async (_name, cancel) => {
+    await render(<button id="target" data-tooltip="Global help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { cancel(); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('cancels a pending open when the document becomes hidden', async () => {
+    await render(<button id="target" data-tooltip="Hidden help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    Object.defineProperty(document, 'hidden', {configurable: true, value: true});
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('cancels a pending open on touch', async () => {
+    await render(<button id="target" data-tooltip="Touch help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { pointer('pointerdown', target, {pointerType: 'touch'}); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it.each(['blur', 'scroll', 'resize', 'pointerleave', 'hidden'])('cancels a queued hit-test frame on %s', async kind => {
+    await render(<button id="target" data-tooltip="Queued help">Target</button>);
+    const target = document.getElementById('target')!;
+    Object.defineProperty(document, 'elementFromPoint', {configurable: true, value: () => target});
+    await act(async () => { pointer('pointerover', target); });
+    await act(async () => { pointer('pointermove', document.body, {clientX: 20, clientY: 20}); });
+    await act(async () => {
+      if (kind === 'blur') window.dispatchEvent(new Event('blur'));
+      else if (kind === 'scroll') window.dispatchEvent(new Event('scroll'));
+      else if (kind === 'resize') window.dispatchEvent(new Event('resize'));
+      else if (kind === 'pointerleave') pointer('pointerout', target, {relatedTarget: document.body});
+      else {
+        Object.defineProperty(document, 'hidden', {configurable: true, value: true});
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('switches anchors by cancelling the old pending open and starting a new dwell', async () => {
+    await render(<>
+      <button id="first" data-tooltip="First help">First</button>
+      <button id="second" data-tooltip="Second help">Second</button>
+    </>);
+    const first = document.getElementById('first')!;
+    const second = document.getElementById('second')!;
+    await act(async () => { pointer('pointerover', first); });
+    await advance(300);
+    await act(async () => { pointer('pointerover', second); });
+    await advance(200);
+    expect(tooltip()).toBeNull();
+    await advance(300);
+    expect(tooltip()?.textContent).toBe('Second help');
+  });
+
+  it('does not reset the dwell on repeated pointermove over the same pending anchor', async () => {
+    await render(<button id="target" data-tooltip="Move help">Target</button>);
+    const target = document.getElementById('target')!;
+    Object.defineProperty(document, 'elementFromPoint', {configurable: true, value: () => target});
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { pointer('pointermove', document.body, {clientX: 20, clientY: 20}); });
+    await flush();
+    await advance(OPEN_DELAY - 301);
+    expect(tooltip()).toBeNull();
+    await advance(1);
+    expect(tooltip()?.textContent).toBe('Move help');
+  });
+
+  it('does not reset the dwell on a repeated gamepad mark for the same pending anchor', async () => {
+    await render(<div id="card" data-gamepad-card>
+      <button id="card-button" data-tooltip="Game title">Game</button>
+    </div>);
+    const card = document.getElementById('card')!;
+    const button = document.getElementById('card-button')!;
+    await act(async () => { card.setAttribute('data-gamepad-focus', ''); await flush(); });
+    await advance(300);
+    await act(async () => { button.setAttribute('data-gamepad-focus', ''); await flush(); });
+    await advance(OPEN_DELAY - 301);
+    expect(tooltip()).toBeNull();
+    await advance(1);
+    expect(tooltip()?.textContent).toBe('Game title');
+  });
+
+  it('keeps a pending Escape dismissed until the pointer leaves and re-enters', async () => {
+    await render(<button id="target" data-tooltip="Escape help">Target</button>);
+    const target = document.getElementById('target')!;
+    Object.defineProperty(document, 'elementFromPoint', {configurable: true, value: () => target});
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true})); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+    await act(async () => { pointer('pointermove', document.body, {clientX: 20, clientY: 20}); });
+    await flush();
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+    await act(async () => { pointer('pointerout', target, {relatedTarget: document.body}); });
+    await act(async () => { pointer('pointerover', target); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()?.textContent).toBe('Escape help');
+  });
+
+  it('cancels a pending open on unmount', async () => {
+    await render(<button id="target" data-tooltip="Unmount help">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { root.unmount(); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+    root = createRoot(document.getElementById('root')!);
+  });
+
+  it('cancels a pending open when the anchor is detached', async () => {
+    const fixture = (shown: boolean) => <>{shown ? <button id="target" data-tooltip="Detached help">Target</button> : null}<TooltipLayer/></>;
+    await act(async () => { root.render(fixture(true)); });
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { root.render(fixture(false)); await flush(); });
+    await advance(OPEN_DELAY);
+    expect(tooltip()).toBeNull();
+  });
+
+  it('opens with the current text and never with stale pending text', async () => {
+    await render(<button id="target" data-tooltip="Old text">Target</button>);
+    const target = document.getElementById('target')!;
+    await act(async () => { pointer('pointerover', target); });
+    await advance(300);
+    await act(async () => { target.setAttribute('data-tooltip', 'New text'); });
+    await advance(200);
+    expect(tooltip()?.textContent).toBe('New text');
+  });
+
+  it('hides the visible tooltip immediately and dwells before switching anchors', async () => {
+    await render(<>
+      <button id="first" data-tooltip="First help">First</button>
+      <button id="second" data-tooltip="Second help">Second</button>
+    </>);
+    const first = document.getElementById('first')!;
+    const second = document.getElementById('second')!;
+    await act(async () => { pointer('pointerover', first); });
+    await open();
+    expect(tooltip()?.textContent).toBe('First help');
+    await act(async () => { pointer('pointerover', second); });
+    expect(tooltip()).toBeNull();
+    expect(first.hasAttribute('aria-describedby')).toBe(false);
+    await advance(OPEN_DELAY - 1);
+    expect(tooltip()).toBeNull();
+    await advance(1);
+    expect(tooltip()?.textContent).toBe('Second help');
   });
 });
 
