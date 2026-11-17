@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { ManagedFamilyStatus, ManagedFamilyInstallResult, ManagedRuntimeOptions } from '../shared/types.js';
-import { runtimeFamilies, type RuntimeFamily } from '../shared/runtime-selection.js';
+import { runtimeFamilies, runtimeFamilyArchSuffix, type RuntimeFamily, type RuntimeFamilyArch } from '../shared/runtime-selection.js';
 import { parseManagedFamilyRelease, verifyLocalManagedFamilyCandidate, verifyManagedFamilyCandidate, type VerifiedManagedFamilyRelease } from './runtime-family-release.js';
 import { resolveRuntimeFamily, retainRuntimeFamilyBuild, verifyRuntimeFamilyPayload, type RuntimeFamilyReceipt } from './runtime-families.js';
 import { materializeRuntimeArchive } from './runtime-family-archive.js';
@@ -18,6 +18,59 @@ function familyId(v: unknown): RuntimeFamily {
     if (v !== 'nexus' && v !== 'nexus-cachyos')
         throw Error('Unknown managed runtime family');
     return v;
+}
+/** The exact payload architecture for this manager's host. It is resolved once
+ * for the manager and reused for every selection, install and local import. */
+function payloadArch(arch: unknown): RuntimeFamilyArch {
+    if (arch === 'x64' || arch === 'arm64')
+        return arch;
+    // The legacy x64-only upstream snapshot still has its own path; only a
+    // managed family install requires a supported payload architecture.
+    throw Error('Managed runtimes are not built for ' + String(arch) + ' hosts.');
+}
+/** The ARM64 managed family is Standard only. CachyOS ARM64 is refused at the
+ * manager level too, before any release list or archive is selected. */
+function managedArch(id: RuntimeFamily, arch: RuntimeFamilyArch): RuntimeFamilyArch {
+    if (arch === 'arm64' && id === 'nexus-cachyos')
+        throw Error('ARM64 managed runtime is available for the Standard runtime only');
+    return arch;
+}
+/** The distribution suffix for the selected payload architecture and the
+ * family-specific asset prefix used by the local import inventory. */
+function familyAssets(id: RuntimeFamily, arch: RuntimeFamilyArch) {
+    return { suffix: runtimeFamilyArchSuffix[arch], prefix: id === 'nexus' ? 'nexus-runtime-' : 'nexus-runtime-cachyos-' };
+}
+/** Skip only coherent, producer-shaped opposite-architecture binaries. Inspect
+ * every asset, excluding corresponding-source archives, independent of API order.
+ * Missing or malformed binaries stay candidates; contradictory metadata cannot
+ * hide the newest host release and silently downgrade it to an older build. */
+function releaseArchitecture(item: Record<string, unknown>, id: RuntimeFamily, arch: RuntimeFamilyArch): 'same' | 'opposite' | 'unknown' | 'conflict' {
+    const prefix = id === 'nexus' ? 'nexus-runtime-' : 'nexus-runtime-cachyos-';
+    const binaryName = new RegExp('^' + prefix + '[0-9][A-Za-z0-9._-]*-g[a-f0-9]{8,40}-(x86_64|aarch64)\\.tar\\.xz$');
+    const binaries = new Set<RuntimeFamilyArch>(), evidence = new Set<RuntimeFamilyArch>();
+    let ambiguousArchive = false;
+    const tag = String(item.tag_name);
+    if (/(?:^|[^a-z0-9])(?:x64|x86_64)(?:$|[^a-z0-9])/i.test(tag)) evidence.add('x64');
+    if (/(?:^|[^a-z0-9])(?:arm64|aarch64)(?:$|[^a-z0-9])/i.test(tag)) evidence.add('arm64');
+    for (const asset of item.assets as unknown[]) {
+        if (!object(asset) || typeof asset.name !== 'string' || !asset.name.startsWith(prefix)) continue;
+        // A checksum or malformed archive can still contradict a binary's host.
+        const hint = /-(x86_64|aarch64)\.[A-Za-z0-9.]+$/i.exec(asset.name);
+        if (hint) evidence.add(hint[1].toLowerCase() === 'aarch64' ? 'arm64' : 'x64');
+        const match = binaryName.exec(asset.name);
+        if (match) {
+            const found = match[1] === 'aarch64' ? 'arm64' : 'x64';
+            binaries.add(found); evidence.add(found);
+        } else if (asset.name.endsWith('.tar.xz') && !asset.name.endsWith('-source.tar.xz')) ambiguousArchive = true;
+    }
+    if (evidence.size > 1) return 'conflict';
+    if (binaries.size === 1 && !ambiguousArchive) return binaries.has(arch) ? 'same' : 'opposite';
+    return 'unknown';
+}
+/** The pristine prefix directory of a verified architecture, used to bind the
+ * single inert Z: template-link exception of an archive. */
+function launchPrefixFor(arch: RuntimeFamilyArch): 'default_pfx' | 'default_pfx_arm64' {
+    return arch === 'arm64' ? 'default_pfx_arm64' : 'default_pfx';
 }
 function options(v: unknown): ManagedRuntimeOptions {
     if (!object(v) || typeof v.allowCachyos !== 'boolean' || typeof v.allowPrerelease !== 'boolean')
@@ -179,21 +232,31 @@ export class ManagedRuntimeManager {
         state.checking = true;
         state.error = undefined;
         try {
+            // Validate the host payload architecture before any network read; an
+            // unsupported host or an ARM64 CachyOS request stays unavailable.
+            const supported = managedArch(id, payloadArch(this.context.arch ?? process.arch));
             this.context.notify();
-            const policy = await this.policy(id, root, value), versions = this.context.versions(), arch = this.context.arch ?? process.arch;
+            const policy = await this.policy(id, root, value), versions = this.context.versions(), arch = supported;
             const json = JSON.parse((await this.bytes('https://api.github.com/repos/' + repositories[id] + '/releases?per_page=30', 2 * 1024 * 1024)).toString('utf8'));
             if (!Array.isArray(json) || json.length > 100)
                 throw Error('Invalid runtime release list');
             // Legacy releases without candidate metadata are not managed-family targets.
-            // Select newest in the chosen channel first, then validate it exactly. Never
-            // fall back past a malformed newest trusted-format candidate.
-            const candidates = json.filter(item => object(item) && item.draft !== true && (item.prerelease !== true || policy.allowPrerelease) && (channel===undefined||typeof item.prerelease!=='boolean'||item.prerelease===(channel==='prerelease')) && typeof item.tag_name === 'string' && item.tag_name.startsWith(id === 'nexus' ? 'runtime-' : 'runtime-cachyos-') && Array.isArray(item.assets) && item.assets.some(asset => object(asset) && asset.name === 'candidate.json'));
+            // Only releases of the requested host architecture are candidates; a
+            // confidently opposite-architecture release is ignored, so one host's
+            // newer tag never blocks the other host. Anything of ambiguous
+            // architecture is never filtered away as if it were the other host.
+            const candidates = json.filter(item => object(item) && item.draft !== true && (item.prerelease !== true || policy.allowPrerelease) && (channel===undefined||typeof item.prerelease!=='boolean'||item.prerelease===(channel==='prerelease')) && typeof item.tag_name === 'string' && item.tag_name.startsWith(id === 'nexus' ? 'runtime-' : 'runtime-cachyos-') && Array.isArray(item.assets) && item.assets.some(asset => object(asset) && asset.name === 'candidate.json') && releaseArchitecture(item, id, arch) !== 'opposite');
             for (const item of candidates)
                 if (typeof item.published_at !== 'string' || !Number.isFinite(Date.parse(item.published_at)))
                     throw Error('Invalid managed runtime publication date');
             candidates.sort((a, b) => Date.parse(String(b.published_at)) - Date.parse(String(a.published_at)));
             if (!candidates.length)
-                throw Error('No supported published managed-family release is available');
+                throw Error('No supported published managed-family release is available for this host architecture');
+            // The newest same-architecture release is validated exactly. A malformed
+            // trusted-format candidate fails closed; it never falls back to an older
+            // build (no silent downgrade).
+            if (releaseArchitecture(candidates[0], id, arch) === 'conflict')
+                throw Error('Conflicting managed runtime release architecture metadata');
             const selected = {
                 input: candidates[0], release: parseManagedFamilyRelease(id, candidates[0], {
                     ...policy, arch, launcherVersion: versions.launcher, backendVersion: versions.backend
@@ -409,7 +472,7 @@ export class ManagedRuntimeManager {
         let snapshot: string | undefined;
         try {
             if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw Error('Choose an absolute local runtime build directory.');
-            const root = this.context.root();
+            const root = this.context.root(), arch = managedArch(id, payloadArch(this.context.arch ?? process.arch)), { suffix, prefix: assetPrefix } = familyAssets(id, arch);
             const candidateFile = path.join(directory, 'candidate.json');
             const candidateStat = await fs.lstat(candidateFile);
             if (!candidateStat.isFile() || candidateStat.isSymbolicLink() || candidateStat.size <= 0 || candidateStat.size > 2 * 1024 * 1024) throw Error('Runtime candidate.json must be a regular bounded file.');
@@ -422,10 +485,14 @@ export class ManagedRuntimeManager {
             const records = candidate.files.map(item => object(item) ? item : undefined);
             if (records.some(item => !item || typeof item.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(item.name) || typeof item.size !== 'number' || !Number.isSafeInteger(item.size) || item.size <= 0 || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256))) throw Error('Runtime candidate.json has an invalid file inventory.');
             const names = new Set(records.map(item => String(item!.name)));
-            const binary = records.find(item => /^nexus-runtime(?:-cachyos)?-[A-Za-z0-9._-]*-g[a-f0-9]{8,40}-x86_64\.tar\.xz$/.test(String(item!.name)))!;
-            const hint = String(binary.name).match(/-g([a-f0-9]{8,40})-x86_64\.tar\.xz$/)![1];
-            const base = String(binary.name).slice(0, -'-x86_64.tar.xz'.length);
-            const expected = [base + '-x86_64.sha512sum', base + '-source.tar.xz', base + '-source.sha512sum'];
+            // Only this family's archive for this host architecture counts; an
+            // archive built for another architecture is never adopted.
+            const archive = new RegExp('^' + assetPrefix + '[0-9][A-Za-z0-9._-]*-g([a-f0-9]{8,40})-' + suffix + '\\.tar\\.xz$');
+            const binaries = records.filter(item => archive.test(String(item!.name)));
+            if (binaries.length !== 1) throw Error('Runtime candidate.json does not name one exact ' + arch + ' family archive.');
+            const binary = binaries[0];
+            const binaryName = String(binary!.name), hint = binaryName.match(archive)![1], base = binaryName.slice(0, -('-' + suffix + '.tar.xz').length);
+            const expected = [base + '-' + suffix + '.sha512sum', base + '-source.tar.xz', base + '-source.sha512sum'];
             if (!expected.every(name => names.has(name))) throw Error('Runtime candidate.json does not bind the exact archive and checksum asset set.');
             const prefix = id === 'nexus' ? 'runtime-' : 'runtime-cachyos-';
             const tag = prefix + 'local-g' + hint;
@@ -459,14 +526,14 @@ export class ManagedRuntimeManager {
                 const stat = await fs.lstat(copied);
                 if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== record.size || await this.hashFile(copied, 'sha256') !== record.sha256) throw Error('Copied local runtime asset changed or failed verification: ' + record.name);
             }
-            for (const checksumName of [base + '-x86_64.sha512sum', base + '-source.sha512sum']) {
+            for (const checksumName of [base + '-' + suffix + '.sha512sum', base + '-source.sha512sum']) {
                 const text = await fs.readFile(path.join(snapshot, checksumName), 'utf8');
                 const match = /^([a-f0-9]{128})[ \t]+\*?([^\r\n]+)\r?\n?$/.exec(text);
-                const asset = checksumName.endsWith('-source.sha512sum') ? base + '-source.tar.xz' : base + '-x86_64.tar.xz';
+                const asset = checksumName.endsWith('-source.sha512sum') ? base + '-source.tar.xz' : binaryName;
                 if (!match || match[2] !== asset) throw Error('Copied local runtime checksum does not name the expected archive.');
                 if (await this.hashFile(path.join(snapshot, asset), 'sha512') !== match[1]) throw Error('Copied local runtime archive failed SHA-512 verification.');
             }
-            const target: Target = { root, release: verified, input: selected, bytes: candidateBytes, policy, localArchive: path.join(snapshot, base + '-x86_64.tar.xz'), local: true };
+            const target: Target = { root, release: verified, input: selected, bytes: candidateBytes, policy, localArchive: path.join(snapshot, binaryName), local: true };
             this.targets.set(id, target);
             this.issuedTargets.set(verified, target);
             return await this.install(id, verified.candidateSha256, value);
@@ -545,8 +612,15 @@ export class ManagedRuntimeManager {
             });
             state.phase = 'Checking runtime files';
             this.context.notify();
-            const top = release.assets.binary.name.slice(0, -'.tar.xz'.length).replace(/-x86_64$/, '');
-            const payload = await materializeRuntimeArchive(archive, extracted, top);
+            // The archive root directory is the stem without the architecture
+            // suffix, e.g. nexus-runtime-11.0-experimental-arm64-g<8>.
+            const suffix = runtimeFamilyArchSuffix[release.arch];
+            const stem = release.assets.binary.name.slice(0, -'.tar.xz'.length), ending = '-' + suffix;
+            if (!stem.endsWith(ending))
+                throw Error('Runtime archive name does not carry its architecture suffix');
+            const top = stem.slice(0, -ending.length);
+            // The template exception is this verified architecture's own prefix.
+            const payload = await materializeRuntimeArchive(archive, extracted, top, undefined, launchPrefixFor(release.arch));
             const manifestFile = path.join(payload, 'nexus-family.json');
             if (!(await fs.lstat(manifestFile)).isFile() || (await fs.stat(manifestFile)).size > 4 * 1024 * 1024)
                 throw Error('Missing bounded managed-family manifest');

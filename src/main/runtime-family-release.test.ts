@@ -1,13 +1,26 @@
 import { expect, it } from 'vitest';
 import { parseManagedFamilyRelease, verifyLocalManagedFamilyCandidate, verifyManagedFamilyCandidate } from './runtime-family-release';
-// Sanitized public c070 release metadata, no download or native execution.
-function fixture(family = 'nexus-cachyos') {
-    const commit = 'c0702eafb4ff4043c54e38bc5028ea77fa6a9487', repository = 'domsvoboda/' + (family === 'nexus' ? 'nexus-runtime' : 'nexus-runtime-cachyos');
-    const prefix = family === 'nexus' ? 'nexus-runtime' : 'nexus-runtime-cachyos', tag = (family === 'nexus' ? 'runtime' : 'runtime-cachyos') + '-11.0-20261103-gc0702eaf', base = prefix + '-11.0-experimental-gc0702eaf';
+// Sanitized public c070 release metadata, no download or native execution. The
+// ARM64 variant mirrors the producer's name (<stem>-arm64-g<sha>-aarch64.tar.xz)
+// and sixteen-gate candidate; it is synthetic release/candidate metadata only.
+const arm = { commit: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', gateCount: 16, suffix: 'aarch64' };
+function fixture(family = 'nexus-cachyos', architecture: 'x64' | 'arm64' = 'x64') {
+    return build(family, architecture, family === 'nexus' ? 'nexus-runtime' : 'nexus-runtime-cachyos');
+}
+/** Same release shape under an explicit family prefix, used to prove that an
+ * ARM64 CachyOS artifact set is not a plausible reviewed layout. */
+function prefixed(prefix: string) {
+    return build('nexus-cachyos', 'arm64', prefix);
+}
+function build(family: string, architecture: 'x64' | 'arm64', prefix: string) {
+    const isArm = architecture === 'arm64';
+    const commit = isArm ? arm.commit : 'c0702eafb4ff4043c54e38bc5028ea77fa6a9487', repository = 'domsvoboda/' + (family === 'nexus' ? 'nexus-runtime' : 'nexus-runtime-cachyos');
+    const tag = (family === 'nexus' ? 'runtime' : 'runtime-cachyos') + (isArm ? '-11.0-arm64-' : '-11.0-') + '20261103-g' + commit.slice(0, 8);
+    const base = prefix + (isArm ? '-11.0-experimental-arm64-g' : '-11.0-experimental-g') + commit.slice(0, 8), suffix = isArm ? arm.suffix : 'x86_64';
     const files = [{
-            name: base + '-x86_64.tar.xz', sha256: 'aaa55320834ce53e1b238badebbea339aaaf5ead4aeb2707e7dd17144cc493fb', size: 401327524
+            name: base + '-' + suffix + '.tar.xz', sha256: 'aaa55320834ce53e1b238badebbea339aaaf5ead4aeb2707e7dd17144cc493fb', size: 401327524
         }, {
-            name: base + '-x86_64.sha512sum', sha256: '6ad003d38ce978fe7ede9fcdbf147c39b584cb4caa058022329667cead51701e', size: 194
+            name: base + '-' + suffix + '.sha512sum', sha256: '6ad003d38ce978fe7ede9fcdbf147c39b584cb4caa058022329667cead51701e', size: 194
         }, {
             name: base + '-source.tar.xz', sha256: 'd75d7d496762dce28a1da596573398c238c6ea3403bd08cb1fdc7b55bcee2a6e', size: 862538548
         }, {
@@ -16,15 +29,15 @@ function fixture(family = 'nexus-cachyos') {
     const candidate: any = {
         schema: 1, kind: 'runtime', repository, commit, ref: 'refs/heads/main', runId: '41623159548', files, sourceGraph: {
             proton: commit, wine: 'e449547994748ef9688a9b38ccb5dbb9dd4ba3ee', xgameruntime: '78780314332079f77052fbeb345b6f7e11e7a44d'
-        }, requiresBackendVersion: '0.2.13', requiresLauncherVersion: '0.4.1', validation: {
-            nativeGateCount: 12, treeSha256: '2cdce736bcd0234638fdcf9183c0a885bcf69eb2ec2159602025ec7fc9d0313d', resultsSha256: '45e2389a1fccec9613733bccafc89335eed48f31dafbaadf8132e4487c2c872f', realGameTest: false, stableApproved: false
+        }, requiresBackendVersion: '0.2.13', requiresLauncherVersion: '0.4.1', ...(isArm ? { arch: 'arm64' } : {}), validation: {
+            nativeGateCount: isArm ? 16 : 12, treeSha256: '2cdce736bcd0234638fdcf9183c0a885bcf69eb2ec2159602025ec7fc9d0313d', resultsSha256: '45e2389a1fccec9613733bccafc89335eed48f31dafbaadf8132e4487c2c872f', realGameTest: false, stableApproved: false
         }
     };
     const release: any = {
         tag_name: tag, target_commitish: commit, draft: false, prerelease: true, published_at: '2026-11-03T12:43:55Z', assets: []
     };
     const policy: any = {
-        arch: 'x64', allowCachyos: true, allowPrerelease: true, launcherVersion: '0.4.2', backendVersion: '0.2.14'
+        arch: architecture, allowCachyos: true, allowPrerelease: true, launcherVersion: '0.4.2', backendVersion: '0.2.14'
     };
     const sync = () => {
         const bytes = JSON.stringify(candidate);
@@ -86,10 +99,21 @@ it.each(['allowCachyos', 'allowPrerelease'])('rejects truthy or absent policy %s
         expect(() => f.parse()).toThrow();
     }
 });
-it.each(['arm64', 'x86_64', '../nexus', undefined])('does not widen managed architecture %s', arch => {
+it.each(['x86_64', '../nexus', undefined, 'x64 ', 'ARM64'])('does not widen managed architecture %s', arch => {
     const f = fixture();
     f.policy.arch = arch;
-    expect(() => f.parse()).toThrow('x64');
+    expect(() => f.parse()).toThrow('Managed runtimes are not built for');
+});
+it('accepts exactly the requested architecture and rejects an archive of the other one', () => {
+    // An x64 request never selects an ARM64-only asset set and vice versa, so a
+    // host can neither downgrade nor cross-install the other architecture.
+    const armOnX64 = fixture('nexus', 'arm64');
+    armOnX64.policy.arch = 'x64';
+    expect(() => armOnX64.parse()).toThrow('Expected one exact family binary archive');
+    const x64OnArm = fixture('nexus');
+    x64OnArm.policy.allowCachyos = false;
+    x64OnArm.policy.arch = 'arm64';
+    expect(() => x64OnArm.parse()).toThrow('Expected one exact family binary archive');
 });
 it.each(['../runtime', 'runtime-../x-gc0702eaf', 'runtime-cachyos-11%2f-gc0702eaf', 'runtime-cachyos-11-gc0702eaf?x', 'runtime-cachyos-11-gdeadbeef'])('rejects unsafe or mismatched tag %s', tag => {
     const f = fixture();
@@ -239,4 +263,77 @@ it('records an optional local build ID without inventing a CI run ID', () => {
     const local = verifyLocalManagedFamilyCandidate(f.sync(), f.parse());
     expect(local.localBuildId).toBe('local-20261108-1');
     expect(local.runId).toBeUndefined();
+});
+
+it('selects and verifies the ARM64 Standard release with its exact suffix and sixteen gates', () => {
+    const f = fixture('nexus', 'arm64');
+    f.policy.allowCachyos = false;
+    const selected = f.parse(), verified = verifyManagedFamilyCandidate(f.bytes, selected);
+    expect(selected.arch).toBe('arm64');
+    expect(selected.assets.binary.name).toMatch(/-arm64-g[0-9a-f]{8}-aarch64\.tar\.xz$/);
+    expect(selected.assets.checksum.name).toBe(selected.assets.binary.name.replace(/\.tar\.xz$/, '.sha512sum'));
+    expect(selected.assets.source.name).toBe(selected.assets.binary.name.replace(/-aarch64\.tar\.xz$/, '-source.tar.xz'));
+    expect(verified.arch).toBe('arm64');
+    expect(verified.validation.nativeGateCount).toBe(16);
+    // Publisher metadata only: no native approval is inferred from the count.
+    expect(verified.validation.realGameTest).toBe(false);
+    expect(verified.validation.stableApproved).toBe(false);
+});
+const renameArmAssets = (f: any, from: RegExp, to: string) => {
+    for (const asset of f.release.assets.filter((item: any) => item.name !== 'candidate.json')) asset.name = asset.name.replace(from, to);
+    f.release.assets = f.release.assets.map((asset: any) => asset.name === 'candidate.json' ? asset
+        : { ...asset, browser_download_url: `https://github.com/domsvoboda/nexus-runtime/releases/download/${f.release.tag_name}/${asset.name}` });
+};
+it.each([
+    ['wrong gate count', (f: any) => { f.candidate.validation.nativeGateCount = 12; }],
+    ['x64 architecture label', (f: any) => { f.candidate.arch = 'x64'; }],
+    ['missing architecture', (f: any) => { delete f.candidate.arch; }],
+    ['unknown architecture', (f: any) => { f.candidate.arch = 'aarch64'; }],
+    ['x86_64 archive instead', (f: any) => renameArmAssets(f, /-aarch64(\.[a-z0-9]+)?$/, '-x86_64$1')],
+    ['archive of another source commit', (f: any) => renameArmAssets(f, /g[0-9a-f]{8}/, 'gffffffff')]
+])('rejects an ARM64 Standard release with %s', (_name, mutate) => {
+    const f = fixture('nexus', 'arm64');
+    f.policy.allowCachyos = false;
+    mutate(f);
+    expect(() => verifyManagedFamilyCandidate(JSON.stringify(f.candidate), f.parse())).toThrow();
+});
+it('keeps ARM64 CachyOS explicitly rejected even with a complete ARM64 asset set and opt-in', () => {
+    // The ARM64 family is Standard only. A fully formed ARM64 CachyOS release,
+    // even with the explicit CachyOS and prerelease opt-ins and sixteen gates,
+    // is refused before any candidate metadata is read.
+    for (const f of [fixture('nexus-cachyos', 'arm64'), prefixed('nexus-runtime')]) {
+        f.sync();
+        const bytes = JSON.stringify(f.candidate);
+        f.release.assets[0].size = Buffer.byteLength(bytes);
+        expect(() => f.parse()).toThrow('ARM64 managed runtime is available for the Standard runtime only');
+        expect(() => verifyManagedFamilyCandidate(bytes, f.parse())).toThrow();
+    }
+});
+it('accepts an x64 candidate that omits its architecture as the legacy contract only', () => {
+    const f = fixture('nexus-cachyos');
+    expect(verifyManagedFamilyCandidate(f.bytes, f.parse()).arch).toBe('x64');
+    // The same omission is never read as ARM64, even at the local entrypoint.
+    const arm = fixture('nexus', 'arm64');
+    arm.policy.allowCachyos = false;
+    delete arm.candidate.arch;
+    expect(() => verifyManagedFamilyCandidate(arm.sync(), arm.parse())).toThrow('must declare its architecture');
+    expect(() => verifyLocalManagedFamilyCandidate(arm.sync(), arm.parse())).toThrow('must declare its architecture');
+});
+it('binds the ARM64 local-import candidate to its own architecture and sixteen gates', () => {
+    const f = fixture('nexus', 'arm64');
+    f.policy.allowCachyos = false;
+    delete f.candidate.runId;
+    f.candidate.localBuild = true;
+    f.candidate.diagnosticOnly = true;
+    f.candidate.promotable = false;
+    const local = verifyLocalManagedFamilyCandidate(f.sync(), f.parse());
+    expect(local.arch).toBe('arm64');
+    expect(local.local).toBe(true);
+    expect(local.validation.nativeGateCount).toBe(16);
+    // A candidate that claims the ARM64 architecture but has x64 gates on an x64
+    // release is still refused: the count belongs to the requested architecture.
+    const x64 = fixture('nexus');
+    x64.policy.allowCachyos = false;
+    x64.candidate.validation.nativeGateCount = 16;
+    expect(() => verifyManagedFamilyCandidate(x64.sync(), x64.parse())).toThrow('twelve');
 });
