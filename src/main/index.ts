@@ -77,8 +77,8 @@ import { InstallQueue, assertActivityCompatible, assertInstallDestination, canon
 import { GameDisplayBlocker } from './game-display.js';
 import { GameShortcuts, shortcutArguments, shortcutInstanceData, shortcutInstanceRequest, shortcutLauncherPath, type ShortcutDestination } from './game-shortcuts.js';
 import { ShortcutLaunch } from './shortcut-launch.js';
-import { acceptSteamHandoff, captureSteamLaunchEnvironment, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest,
-  type SteamHandoff, type SteamLaunchEnvironment, type SteamLaunchLease } from './steam-launch-context.js';
+import { acceptSteamHandoff, captureSteamLaunchEnvironment, gameSteamContext, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest,
+  steamOverlayFiltered, steamOverlayLibraries, type SteamGameContext, type SteamHandoff, type SteamLaunchEnvironment, type SteamLaunchLease } from './steam-launch-context.js';
 import { loadShortcutIcon } from './shortcut-icon.js';
 import { AccountProfile } from './account-profile.js';
 import { enableSavedAccounts, forgetSavedAccount, listSavedAccounts, useSavedAccount, validAccountName } from './saved-accounts.js';
@@ -189,8 +189,7 @@ const operations = new Map<string, ChildProcessWithoutNullStreams>();
 const gameProcesses = new Map<string, GameProcess>();
 const gameFinalizations = new Map<string, Promise<void>>();
 const steamLeases = new Set<SteamLaunchLease>();
-let steamLauncherSession: { environment: SteamLaunchEnvironment; lease: SteamLaunchLease } | undefined;
-interface SteamGameContext { environment: SteamLaunchEnvironment; signal: AbortSignal }
+let steamLauncherSession: { environment: SteamLaunchEnvironment; overlayFiltered: boolean; lease: SteamLaunchLease } | undefined;
 interface LaunchRequest { gameId?: string; steam?: SteamHandoff }
 const cancelledDownloads = new Set<string>();
 const downloadCancellations = new Map<string, Promise<void>>();
@@ -303,12 +302,21 @@ if (process.platform === 'linux') {
 }
 // Electron's lock is scoped to userData, so independent profiles stay isolated.
 let steamOffer: ReturnType<typeof offerSteamHandoff> | undefined;
+// This process itself was started by Steam. The packaged wrapper removed the
+// overlay before Electron started; only that fact is kept, never a path.
+let primarySteam: SteamLaunchEnvironment | undefined;
+let primaryOverlayFiltered = false;
 try {
   const environment = !demoMode && !startupError ? captureSteamLaunchEnvironment(process.env) : undefined;
-  if (environment) steamOffer = offerSteamHandoff(environment, () => app.quit());
+  if (environment) primarySteam = environment;
+  if (environment) steamOffer = offerSteamHandoff(environment, () => app.quit(),
+    undefined, steamOverlayFiltered(process.env));
 } catch (error) { startupError = error as Error; }
 const primaryInstance = demoMode || app.requestSingleInstanceLock({ ...shortcutInstanceData(startupRequest, Boolean(startupError)),
   ...(steamOffer ? { nexusSteam: steamOffer.handoff } : {}) });
+// The primary may use its bootstrap marker only together with its validated
+// Steam startup identity. Contextual requests still take precedence per game.
+if (primaryInstance && primarySteam) primaryOverlayFiltered = steamOverlayFiltered(process.env);
 if (primaryInstance) steamOffer?.close();
 if (!primaryInstance && !steamOffer) app.quit();
 else if (primaryInstance && !demoMode) app.on('second-instance', (_event, _argv, _workingDirectory, additionalData) => {
@@ -356,7 +364,7 @@ async function handleLaunchRequest({ gameId, steam }: LaunchRequest): Promise<vo
         lease.signal.throwIfAborted();
         // Opening another alias must not detach or stop an existing session.
         if (steamLauncherSession && !steamLauncherSession.lease.signal.aborted) return;
-        const session = { environment: steam.environment, lease };
+        const session = { environment: steam.environment, overlayFiltered: steam.overlayFiltered === true, lease };
         steamLauncherSession = session;
         const owned = lease;
         owned.signal.addEventListener('abort', () => {
@@ -367,7 +375,8 @@ async function handleLaunchRequest({ gameId, steam }: LaunchRequest): Promise<vo
       }
       return;
     }
-    await shortcutLaunch.request(gameId, steam && lease ? { environment: steam.environment, signal: lease.signal } : undefined);
+    await shortcutLaunch.request(gameId, steam && lease ? { environment: steam.environment,
+      overlayFiltered: steam.overlayFiltered === true, signal: lease.signal } : undefined);
     // Preparation returning is not game exit. Steam must keep its tracked
     // secondary alive through account-service and process cleanup too.
     if (lease) await gameFinalizations.get(gameId);
@@ -1430,7 +1439,16 @@ async function prepareGameLaunch(id: string, steam?: SteamGameContext): Promise<
   let inviteBridge: GameInviteBridge | undefined;
   let launchWrapper: GameWrapper | undefined;
   let releaseDisplay = () => {};
-  const launchEnvironment = steamGameEnvironment(process.env, steam?.environment ?? steamLauncherSession?.environment);
+  // Keep the authenticated request/session authoritative, including an explicit
+  // false. Only an otherwise context-free launch may use this primary's own
+  // validated Steam startup, covering both a cold shortcut and the Play button.
+  const steamContext = gameSteamContext({
+    request: steam ?? (steamLauncherSession ? { environment: steamLauncherSession.environment,
+      overlayFiltered: steamLauncherSession.overlayFiltered, signal: steamLauncherSession.lease.signal } : undefined),
+    primary: primarySteam ? { environment: primarySteam, overlayFiltered: primaryOverlayFiltered } : undefined,
+  });
+  const launchEnvironment = steamGameEnvironment(process.env, steamContext?.environment);
+  const restoreSteamOverlay = steamContext?.overlayFiltered === true;
   const steamSignal = steam?.signal ?? steamLauncherSession?.lease.signal;
   let removeSteamStop = () => {};
   try {
@@ -1448,7 +1466,15 @@ async function prepareGameLaunch(id: string, steam?: SteamGameContext): Promise<
     // the runtime's own launch options (for example PROTON_USE_OPTISCALER) are
     // processed. Game tools and launch options wrap that command, exactly like
     // Steam's %command%.
-    launchWrapper = await prepareGameWrapper(preparedGameWine(protonRunner, wine), game.launchTools, path.join(dataRoot, 'launch-wrappers'), launchEnvironment, game.path);
+    // Steam's overlay is restored only inside the game's Wine/Proton command,
+    // and only from the trusted Steam installation root used above. Auth,
+    // services, prefix preparation and this launcher never receive it.
+    const steamOverlay = restoreSteamOverlay ? await steamOverlayLibraries(steamRoot).catch(() => undefined) : undefined;
+    if (restoreSteamOverlay) writeLaunchLog(steamOverlay
+      ? 'Steam overlay libraries available for the game command.'
+      : 'Steam overlay libraries were not found in the Steam installation; the game starts without the overlay.');
+    launchWrapper = await prepareGameWrapper(preparedGameWine(protonRunner, wine), game.launchTools, path.join(dataRoot, 'launch-wrappers'), launchEnvironment, game.path,
+      { steamOverlayLibraries: steamOverlay });
     args[2] = launchWrapper.command;
     if (protonRunner) {
       // The optional component is selected by the game's launch options, not by
