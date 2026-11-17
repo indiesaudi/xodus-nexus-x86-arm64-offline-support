@@ -2,6 +2,9 @@
 # Steam's injected overlay can crash Electron before JavaScript starts (including
 # the font bootstrap). Filter only that library, retaining other preloads and
 # Steam's launch/tracking environment. Never evaluate or glob loader tokens.
+# The marker records only that this invocation removed the overlay, so the main
+# process can restore it for the game's own command. It is never a path.
+unset XODUS_NEXUS_STEAM_OVERLAY_FILTERED
 if [ -n "${LD_PRELOAD-}" ]; then
   nexus_filtered_preload=$(
     set -f
@@ -29,6 +32,7 @@ if [ -n "${LD_PRELOAD-}" ]; then
   )
   nexus_filtered_preload=${nexus_filtered_preload%.}
   if [ "$nexus_filtered_preload" != "$LD_PRELOAD" ]; then
+    export XODUS_NEXUS_STEAM_OVERLAY_FILTERED=1
     if [ -n "$nexus_filtered_preload" ]; then
       export LD_PRELOAD="$nexus_filtered_preload"
     else

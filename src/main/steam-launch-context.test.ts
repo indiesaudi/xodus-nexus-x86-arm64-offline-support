@@ -1,11 +1,14 @@
-import { lstatSync, promises as fs } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, promises as fs, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { acceptSteamHandoff, captureSteamLaunchEnvironment, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest, steamPrimaryEnvironment } from './steam-launch-context.js';
+import { acceptSteamHandoff, captureSteamLaunchEnvironment, gameSteamContext, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest, steamOverlayFiltered, steamOverlayLibraries, steamPrimaryEnvironment, type SteamLaunchEnvironment } from './steam-launch-context.js';
 
 const environment = { SteamGameId:'16968485195965530112', SteamAppId:'3950780123', SDL_GAMECONTROLLERCONFIG:'synthetic mapping with spaces' };
 const offers: ReturnType<typeof offerSteamHandoff>[] = [];
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const leases: Awaited<ReturnType<typeof acceptSteamHandoff>>[] = [];
 afterEach(() => { for (const lease of leases.splice(0)) lease.close(); for (const offer of offers.splice(0)) offer.close(); });
 async function offer(timeout?: number) {
@@ -166,4 +169,75 @@ it('does not let unauthenticated local connections consume the lease', async () 
   expect(f.finished).not.toHaveBeenCalled();
   const lease = await acceptSteamHandoff(f.handoff); leases.push(lease);
   expect(lease.signal.aborted).toBe(false);
+});
+
+// The overlay marker is a strict boolean owned by the packaged wrapper. A
+// shortcut request may report it, but it can never name a library or path.
+it('accepts only the wrapper marker as evidence that the overlay was filtered', () => {
+  expect(steamOverlayFiltered({ XODUS_NEXUS_STEAM_OVERLAY_FILTERED:'1' })).toBe(true);
+  for (const value of [undefined, '', '0', 'true', ' 1', '1 ', '/steam/gameoverlayrenderer.so'])
+    expect(steamOverlayFiltered({ XODUS_NEXUS_STEAM_OVERLAY_FILTERED:value })).toBe(false);
+  expect(steamOverlayFiltered({})).toBe(false);
+});
+
+it('forwards the overlay marker across the handoff as a strict boolean only', async () => {
+  const finished = vi.fn();
+  const value = offerSteamHandoff(environment, finished, undefined, true); offers.push(value);
+  expect(value.handoff.overlayFiltered).toBe(true);
+  expect(steamHandoffRequest(JSON.parse(JSON.stringify({ nexusSteam:value.handoff })))).toEqual({ ...value.handoff, overlayFiltered:true });
+  const plain = offerSteamHandoff(environment, finished); offers.push(plain);
+  expect(plain.handoff).not.toHaveProperty('overlayFiltered');
+  expect(steamHandoffRequest({ nexusSteam:plain.handoff })).not.toHaveProperty('overlayFiltered');
+  const handoff = value.handoff;
+  for (const marker of ['1', 1, null, {}, [], '/steam/gameoverlayrenderer.so'])
+    expect(() => steamHandoffRequest({ nexusSteam:{ ...handoff, overlayFiltered:marker } })).toThrow('Invalid Steam shortcut handoff.');
+  // No request can add a library, path or arbitrary preload field.
+  for (const extra of [{ LD_PRELOAD:'/steam/gameoverlayrenderer.so' }, { overlayLibraries:['/bad.so'] }, { environment:{ ...environment, LD_PRELOAD:'/bad.so' } }])
+    expect(() => steamHandoffRequest({ nexusSteam:{ ...handoff, ...extra } })).toThrow();
+});
+
+async function steamFixture(pairs: Record<string, boolean>) {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'nexus-steam-root-')); roots.push(root);
+  for (const [directory, present] of Object.entries(pairs)) {
+    mkdirSync(path.join(root, directory), { recursive:true });
+    if (present) writeFileSync(path.join(root, directory, 'gameoverlayrenderer.so'), 'fixture');
+  }
+  return root;
+}
+
+it('resolves the overlay only from the trusted Steam root, modern pair before the legacy fallback', async () => {
+  const modern = await steamFixture({ steamrt64:true, steamrt32:true, ubuntu12_64:true, ubuntu12_32:true });
+  expect(await steamOverlayLibraries(modern)).toEqual([path.join(modern, 'steamrt64', 'gameoverlayrenderer.so'),
+    path.join(modern, 'steamrt32', 'gameoverlayrenderer.so')]);
+  const legacy = await steamFixture({ ubuntu12_64:true, ubuntu12_32:true });
+  expect(await steamOverlayLibraries(legacy)).toEqual([path.join(legacy, 'ubuntu12_64', 'gameoverlayrenderer.so'),
+    path.join(legacy, 'ubuntu12_32', 'gameoverlayrenderer.so')]);
+  // Both architectures are required; a partial or missing installation is safe.
+  for (const pairs of [{}, { steamrt64:true }, { steamrt64:true, steamrt32:true, ubuntu12_64:true }]) {
+    const root = await steamFixture(pairs);
+    // The legacy pair is only a fallback for an incomplete modern install.
+    const expected = pairs.steamrt64 && pairs.steamrt32 ? [path.join(root, 'steamrt64', 'gameoverlayrenderer.so'),
+      path.join(root, 'steamrt32', 'gameoverlayrenderer.so')]
+      : pairs.ubuntu12_64 && pairs.ubuntu12_32 ? [path.join(root, 'ubuntu12_64', 'gameoverlayrenderer.so'),
+        path.join(root, 'ubuntu12_32', 'gameoverlayrenderer.so')] : undefined;
+    expect(await steamOverlayLibraries(root)).toEqual(expected);
+  }
+});
+
+// The in-app launch path: a contextual shortcut request always wins, and only
+// without one does this process's own Steam identity apply.
+const primary: SteamLaunchEnvironment = { SteamGameId:'456' };
+it('selects the Steam context of a game launch without inventing one', () => {
+  const signal = new AbortController().signal;
+  // Cold primary Steam launch: the game runs in this very Steam-started process.
+  expect(gameSteamContext({ primary:{ environment:primary, overlayFiltered:true } }))
+    .toMatchObject({ environment:primary, overlayFiltered:true });
+  expect(gameSteamContext({ primary:{ environment:primary, overlayFiltered:true } })?.signal.aborted).toBe(false);
+  // Desktop launch: no Steam identity, nothing selected.
+  expect(gameSteamContext({})).toBeUndefined();
+  // A contextual shortcut request wins, including an explicit false, even when
+  // the primary process itself was started by a filtered Steam launch.
+  const request = { environment, overlayFiltered:false, signal };
+  expect(gameSteamContext({ request, primary:{ environment:primary, overlayFiltered:true } })).toBe(request);
+  expect(gameSteamContext({ request: { ...request, overlayFiltered:true }, primary:{ environment:primary, overlayFiltered:false } })?.overlayFiltered).toBe(true);
 });

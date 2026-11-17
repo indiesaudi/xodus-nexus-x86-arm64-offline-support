@@ -22,7 +22,7 @@ const selected = ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'SteamAppId', 'SteamGameId',
   'STEAM_COMPAT_APP_ID', 'DISPLAY', 'WAYLAND_DISPLAY', 'ELECTRON_RUN_AS_NODE',
   'FONTCONFIG_FILE', 'XODUS_NEXUS_FONTCONFIG', 'XODUS_NEXUS_FONTCONFIG_ORIGINAL',
   'XODUS_NEXUS_FONTCONFIG_ORIGINAL_SET', 'GTK_IM_MODULE', 'QT_IM_MODULE',
-  'XDG_CURRENT_DESKTOP', 'XODUS_NEXUS_STEAM_IME'];
+  'XDG_CURRENT_DESKTOP', 'XODUS_NEXUS_STEAM_IME', 'XODUS_NEXUS_STEAM_OVERLAY_FILTERED'];
 fs.appendFileSync(process.env.NEXUS_TEST_CAPTURE, JSON.stringify({
   bootstrap: !!bootstrap, pid: process.pid, args: process.argv.slice(2),
   env: Object.fromEntries(selected.map(key => [key, process.env[key] ?? null]))
@@ -37,7 +37,7 @@ else process.exitCode = Number(process.env.NEXUS_TEST_EXIT || 0);
   for (const key of ['LD_PRELOAD', 'ELECTRON_RUN_AS_NODE', 'FONTCONFIG_FILE',
     'XODUS_NEXUS_FONTCONFIG', 'XODUS_NEXUS_FONTCONFIG_ORIGINAL',
     'XODUS_NEXUS_FONTCONFIG_ORIGINAL_SET', 'GTK_IM_MODULE', 'QT_IM_MODULE',
-    'XDG_CURRENT_DESKTOP', 'XODUS_NEXUS_STEAM_IME']) delete env[key];
+    'XDG_CURRENT_DESKTOP', 'XODUS_NEXUS_STEAM_IME', 'XODUS_NEXUS_STEAM_OVERLAY_FILTERED']) delete env[key];
   Object.assign(env, environment);
   const result = spawnSync('/bin/sh', [wrapper, ...args], { env, cwd: root, encoding: 'utf8', timeout: 10_000 });
   expect(result.error).toBeUndefined();
@@ -109,6 +109,33 @@ describe('packaged Linux launcher bootstrap', () => {
     expect(result.status).toBe(0);
     expect(records).toHaveLength(2);
     for (const record of records) expect(record.env.LD_PRELOAD).toBeNull();
+  });
+
+  // The marker is the only record that this invocation removed the overlay, so
+  // the main process can restore it for the game command. It carries no path.
+  it.each(['gameoverlayrenderer.so', '/steam/ubuntu12_64/gameoverlayrenderer.so:/custom/keep.so',
+    ':$ORIGIN/custom.so::/steam/steamrt64/gameoverlayrenderer.so:'])
+  ('marks the overlay filter before both Electron invocations: %j', preload => {
+    const { records, main, result } = launch({ LD_PRELOAD: preload });
+    expect(result.status).toBe(0);
+    expect(records).toHaveLength(2);
+    for (const record of records) expect(record.env.XODUS_NEXUS_STEAM_OVERLAY_FILTERED).toBe('1');
+    expect(main.env.LD_PRELOAD ?? '').not.toContain('gameoverlayrenderer.so');
+  });
+
+  it.each([undefined, '', '/custom/libMangoHud.so', '/custom/gameoverlayrenderer.so.old:libgameoverlayrenderer.so'])
+  ('never marks an overlay filter when nothing was filtered: %j', preload => {
+    const { records } = launch({ LD_PRELOAD: preload });
+    for (const record of records) expect(record.env.XODUS_NEXUS_STEAM_OVERLAY_FILTERED).toBeNull();
+  });
+
+  it('clears a stale inherited marker instead of trusting it', () => {
+    const { records, main } = launch({ LD_PRELOAD: '/custom/keep.so', XODUS_NEXUS_STEAM_OVERLAY_FILTERED: '1' }, ['--native-helper']);
+    for (const record of records) expect(record.env.XODUS_NEXUS_STEAM_OVERLAY_FILTERED).toBeNull();
+    expect(main.env.LD_PRELOAD).toBe('/custom/keep.so');
+    // A real filter replaces the stale value with its own marker.
+    const filtered = launch({ LD_PRELOAD: '/steam/gameoverlayrenderer.so', XODUS_NEXUS_STEAM_OVERLAY_FILTERED: '0' }, ['--native-helper']);
+    for (const record of filtered.records) expect(record.env.XODUS_NEXUS_STEAM_OVERLAY_FILTERED).toBe('1');
   });
 
   it('keeps other library order and loader tokens with mixed delimiters', () => {
