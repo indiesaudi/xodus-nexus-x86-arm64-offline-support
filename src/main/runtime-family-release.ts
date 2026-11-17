@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { RuntimeFamily } from '../shared/runtime-selection.js';
+import { runtimeFamilyArch, runtimeFamilyArchSuffix, runtimeFamilyNativeGates, type RuntimeFamily, type RuntimeFamilyArch } from '../shared/runtime-selection.js';
 const repositories = {
     nexus: 'domsvoboda/nexus-runtime', 'nexus-cachyos': 'domsvoboda/nexus-runtime-cachyos'
 } as const;
@@ -16,7 +16,8 @@ export interface ManagedFamilyRelease {
     readonly tag: string;
     readonly commitHint: string;
     readonly targetCommitish: string;
-    readonly arch: 'x64';
+    /** Payload architecture this release was selected for; it equals the host. */
+    readonly arch: RuntimeFamilyArch;
     readonly prerelease: boolean;
     readonly publishedAt: string;
     readonly assets: Readonly<{
@@ -48,7 +49,7 @@ export interface VerifiedManagedFamilyRelease extends ManagedFamilyRelease {
     readonly sourceGraph: Readonly<Record<string, unknown>>;
     /** Publisher metadata only, not an independent native test or release approval. */
     readonly validation: Readonly<{
-        nativeGateCount: 12;
+        nativeGateCount: 12 | 16;
         treeSha256: string;
         resultsSha256: string;
         realGameTest: boolean;
@@ -96,11 +97,18 @@ export function parseManagedFamilyRelease(family: unknown, value: unknown, optio
     if (family !== 'nexus' && family !== 'nexus-cachyos')
         throw Error('Unknown managed runtime family');
     const policy = record(options, 'runtime release policy');
-    if (policy.arch !== 'x64')
-        throw Error('Managed family payload requires reviewed x64 architecture');
+    // The payload architecture is exactly the one requested for this host. It is
+    // repeated on every later re-selection/install so a wrong-host or forged
+    // descriptor can never be renewed against another architecture.
+    const arch = runtimeFamilyArch(policy.arch), suffix = runtimeFamilyArchSuffix[arch];
     const allowCachyos = flag(policy.allowCachyos, 'CachyOS opt-in'), allowPrerelease = flag(policy.allowPrerelease, 'prerelease opt-in');
     if (family === 'nexus-cachyos' && !allowCachyos)
         throw Error('Explicit CachyOS opt-in is required');
+    // The reviewed ARM64 payload family is Standard only: an ARM64 CachyOS
+    // release is refused even with the explicit CachyOS opt-in, so no host can
+    // install, adopt or fall back to an ARM64 CachyOS runtime.
+    if (family === 'nexus-cachyos' && arch === 'arm64')
+        throw Error('ARM64 managed runtime is available for the Standard runtime only');
     const launcher = version(policy.launcherVersion, 'installed launcher version'), backend = version(policy.backendVersion, 'installed backend version');
     const release = record(value, 'runtime release');
     if (flag(release.draft, 'draft flag'))
@@ -134,13 +142,15 @@ export function parseManagedFamilyRelease(family: unknown, value: unknown, optio
         }));
     }
     const assetPrefix = family === 'nexus' ? 'nexus-runtime-' : 'nexus-runtime-cachyos-';
-    const binary = [...assets.values()].filter(item => item.name.startsWith(assetPrefix) && new RegExp('^' + assetPrefix + '[0-9][A-Za-z0-9._-]*-g([a-f0-9]{8,40})-x86_64\\.tar\\.xz$').test(item.name));
+    // Only the archive of the requested architecture is a candidate. An archive
+    // for another host never becomes a target, so no cross-architecture fallback.
+    const binary = [...assets.values()].filter(item => item.name.startsWith(assetPrefix) && new RegExp('^' + assetPrefix + '[0-9][A-Za-z0-9._-]*-g([a-f0-9]{8,40})-' + suffix + '\\.tar\\.xz$').test(item.name));
     if (binary.length !== 1)
         throw Error('Expected one exact family binary archive');
-    const name = binary[0].name, archiveHint = name.match(/-g([a-f0-9]{8,40})-x86_64\.tar\.xz$/)![1];
+    const name = binary[0].name, archiveHint = name.match(new RegExp('-g([a-f0-9]{8,40})-' + suffix + '\\.tar\\.xz$'))![1];
     if (hint !== archiveHint)
         throw Error('Runtime archive and release tag source commits differ');
-    const base = name.slice(0, -'-x86_64.tar.xz'.length);
+    const base = name.slice(0, -('-' + suffix + '.tar.xz').length);
     const get = (name: string, max: number) => {
         const asset = assets.get(name);
         if (!asset)
@@ -149,10 +159,10 @@ export function parseManagedFamilyRelease(family: unknown, value: unknown, optio
         return asset;
     };
     const selected = Object.freeze({
-        candidate: get('candidate.json', maxMetadata), binary: get(name, 8 * 1024 ** 3), checksum: get(base + '-x86_64.sha512sum', maxChecksum), source: get(base + '-source.tar.xz', 32 * 1024 ** 3), sourceChecksum: get(base + '-source.sha512sum', maxChecksum)
+        candidate: get('candidate.json', maxMetadata), binary: get(name, 8 * 1024 ** 3), checksum: get(base + '-' + suffix + '.sha512sum', maxChecksum), source: get(base + '-source.tar.xz', 32 * 1024 ** 3), sourceChecksum: get(base + '-source.sha512sum', maxChecksum)
     });
     const result = Object.freeze({
-        family, repository, tag, commitHint: hint, arch: 'x64' as const, targetCommitish, prerelease, publishedAt, assets: selected, installedVersions: Object.freeze({
+        family, repository, tag, commitHint: hint, arch, targetCommitish, prerelease, publishedAt, assets: selected, installedVersions: Object.freeze({
             launcher, backend
         })
     });
@@ -175,6 +185,12 @@ function verifyManagedFamilyCandidateMode(bytes: unknown, selected: unknown, loc
     if (!Buffer.from(json, 'utf8').equals(raw))
         throw Error('Invalid candidate UTF-8');
     const candidate = record(JSON.parse(json), 'runtime candidate');
+    // The architecture is required for both families. A legacy candidate without
+    // it is only acceptable for an x64 payload, never read as ARM64.
+    if (candidate.arch !== undefined && candidate.arch !== release.arch)
+        throw Error('Runtime candidate architecture differs from the selected ' + release.arch + ' payload');
+    if (candidate.arch === undefined && release.arch !== 'x64')
+        throw Error('ARM64 runtime candidate must declare its architecture');
     if (candidate.schema !== 1 || candidate.kind !== 'runtime' || candidate.repository !== release.repository || candidate.ref !== 'refs/heads/main')
         throw Error('Candidate must match the selected main runtime repository');
     const commit = text(candidate.commit, /^[a-f0-9]{40}$/, 'candidate source commit', 40);
@@ -235,10 +251,13 @@ function verifyManagedFamilyCandidateMode(bytes: unknown, selected: unknown, loc
         });
     });
     const validation = record(candidate.validation, 'candidate validation metadata');
-    if (validation.nativeGateCount !== 12)
-        throw Error('Expected twelve native validation gate records');
+    // Twelve x64 gates or sixteen ARM64 gates; the count alone is publisher
+    // metadata, but a count for the other architecture is a forged identity.
+    const nativeGateCount = runtimeFamilyNativeGates[release.arch];
+    if (validation.nativeGateCount !== nativeGateCount)
+        throw Error(release.arch === 'arm64' ? 'Expected sixteen native ARM64 validation gate records' : 'Expected twelve native validation gate records');
     const evidence = Object.freeze({
-        nativeGateCount: 12 as const, treeSha256: sha(validation.treeSha256, 'validation tree hash'), resultsSha256: sha(validation.resultsSha256, 'validation results hash'), realGameTest: flag(validation.realGameTest, 'real-game metadata flag'), stableApproved: flag(validation.stableApproved, 'stable approval metadata flag')
+        nativeGateCount, treeSha256: sha(validation.treeSha256, 'validation tree hash'), resultsSha256: sha(validation.resultsSha256, 'validation results hash'), realGameTest: flag(validation.realGameTest, 'real-game metadata flag'), stableApproved: flag(validation.stableApproved, 'stable approval metadata flag')
     });
     return Object.freeze({
         ...release, commit, ...(local ? { local: true as const, localBuildId } : { runId }), candidateSha256: createHash('sha256').update(raw).digest('hex'), files: Object.freeze(files), requiresLauncherVersion, requiresBackendVersion, sourceGraph, validation: evidence

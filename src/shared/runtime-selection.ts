@@ -21,6 +21,20 @@ export function runtimeBuildApproval(value:unknown):Readonly<RuntimeBuildApprova
 export function sameRuntimeBuild(a:unknown,b:unknown):boolean {
   try{const left=runtimeBuildApproval(a),right=runtimeBuildApproval(b);return left.buildId===right.buildId&&left.manifestSha256===right.manifestSha256&&left.sourceCommit===right.sourceCommit;}catch{return false;}
 }
+/** A managed family payload is built for exactly one host architecture. The
+ * archive suffix is the producer's distribution name for that architecture. */
+export const runtimeFamilyArchitectures = ['x64', 'arm64'] as const;
+export type RuntimeFamilyArch = typeof runtimeFamilyArchitectures[number];
+export const runtimeFamilyArchSuffix: Record<RuntimeFamilyArch, string> = { x64: 'x86_64', arm64: 'aarch64' };
+/** Native validation gate count published in candidate metadata: twelve x64
+ * gates, sixteen ARM64 gates. No other value is reviewed. */
+export const runtimeFamilyNativeGates: Record<RuntimeFamilyArch, 12 | 16> = { x64: 12, arm64: 16 };
+/** Map a runtime host architecture to the payload architecture it may install.
+ * Every other host (ia32, ppc64, ...) has no managed family payload. */
+export function runtimeFamilyArch(value: unknown): RuntimeFamilyArch {
+  if (value === 'x64' || value === 'arm64') return value;
+  throw Error('Managed runtimes are not built for ' + String(value) + ' hosts.');
+}
 export interface InstalledRuntimeFamily {
   id: RuntimeFamily; label: string; buildId: string; sourceCommit: string; manifestSha256:string;
   /** Read-only display path from the verified managed payload. It is never a

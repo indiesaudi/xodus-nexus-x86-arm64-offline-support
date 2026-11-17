@@ -19,9 +19,15 @@ class BoundedInput:
   if position<0 or position>budget: raise ValueError('Archive decoded position exceeds limit')
   return self.source.seek(offset,whence)
  def tell(self): return self.source.tell()
-archive,stage,top,maximum=sys.argv[1:];budget=int(maximum)
+archive,stage,top,maximum,template=sys.argv[1:];budget=int(maximum)
 if os.path.islink(stage) or not os.path.isdir(stage) or os.listdir(stage): raise ValueError('Owned empty staging directory required')
 seen={}; total=0; links={}; directories=[]
+# The only absolute link a runtime may carry: the inert Z: drive mapping of the
+# requested architecture's own default template. The caller names that prefix
+# ('default_pfx' for x64, 'default_pfx_arm64' for ARM64); the other
+# architecture's prefix is never exempted and no path is used to infer it.
+template_key=top+'/files/share/'+template+'/dosdevices/z:' if template in ('default_pfx','default_pfx_arm64') else ''
+def template(key,target): return bool(template_key) and key==template_key and target=='/'
 def name(value):
  if not isinstance(value,str) or not value or len(value)>4096 or '\\' in value or any(ord(c)<32 or ord(c)==127 for c in value) or value.startswith('/'): raise ValueError('Unsafe archive path')
  parts=value.rstrip('/').split('/')
@@ -56,7 +62,7 @@ with lzma.open(archive,'rb') as decoded, tarfile.open(fileobj=BoundedInput(decod
    total+=seen[target].size
    if total>budget: raise ValueError('Expanded hardlink copies exceed limit')
   else:
-   special=key==top+'/files/share/default_pfx/dosdevices/z:' and target=='/'
+   special=template(key,target)
    if not target or '\\' in target or any(ord(c)<32 or ord(c)==127 for c in target): raise ValueError('Unsafe link target')
    resolved=posixpath.normpath(posixpath.join(posixpath.dirname(key),target))
    if not special and (target.startswith('/') or not resolved.startswith(top+'/')): raise ValueError('Archive link escapes runtime')
@@ -74,7 +80,7 @@ with lzma.open(archive,'rb') as decoded, tarfile.open(fileobj=BoundedInput(decod
    if prefix in seen and not seen[prefix].isdir() and prefix not in links and length<len(parts): raise ValueError('Archive link traverses a non-directory')
    if prefix in links:
     item=links[prefix]
-    if prefix==top+'/files/share/default_pfx/dosdevices/z:' and item.linkname=='/': raise ValueError('Archive link follows external template mapping')
+    if template(prefix,item.linkname): raise ValueError('Archive link follows external template mapping')
     target=name(item.linkname) if item.islnk() else posixpath.normpath(posixpath.join(posixpath.dirname(prefix),item.linkname))
     if not target.startswith(top+'/'): raise ValueError('Archive link escapes runtime')
     if length<len(parts): target=posixpath.join(target,*parts[length:])
@@ -82,7 +88,7 @@ with lzma.open(archive,'rb') as decoded, tarfile.open(fileobj=BoundedInput(decod
   if key not in seen and key not in inferred: raise ValueError('Dangling archive link')
   return key
  for key,item in links.items():
-  if key==top+'/files/share/default_pfx/dosdevices/z:' and item.linkname=='/': continue
+  if template(key,item.linkname): continue
   if item.issym():
    stack=[]
    for part in posixpath.join(posixpath.dirname(key),item.linkname).split('/'):
@@ -113,15 +119,20 @@ with lzma.open(archive,'rb') as decoded, tarfile.open(fileobj=BoundedInput(decod
  for destination,mode in sorted(directories,key=lambda x:len(x[0]),reverse=True): os.chmod(destination,mode)
 print('Runtime archive materialized safely')
 `;
-export async function materializeRuntimeArchive(archive: string, stage: string, top: string, maximumExpandedBytes = 32 * 1024 ** 3): Promise<string> {
+/** The pristine prefix directory a payload's template link belongs to. It is
+ * the verified payload architecture's own prefix, never read from an archive. */
+export type RuntimeArchiveTemplate = 'default_pfx' | 'default_pfx_arm64';
+export async function materializeRuntimeArchive(archive: string, stage: string, top: string, maximumExpandedBytes = 32 * 1024 ** 3, template: RuntimeArchiveTemplate = 'default_pfx'): Promise<string> {
     if (!Number.isSafeInteger(maximumExpandedBytes) || maximumExpandedBytes <= 0 || maximumExpandedBytes > 32 * 1024 ** 3)
         throw Error('Invalid runtime expansion limit');
+    if (template !== 'default_pfx' && template !== 'default_pfx_arm64')
+        throw Error('Invalid runtime template prefix');
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(top) || top.includes('..'))
         throw Error('Invalid runtime archive root');
     if (!(await fs.lstat(stage)).isDirectory() || (await fs.readdir(stage)).length)
         throw Error('Owned empty runtime staging directory required');
     try {
-        await execute('python3', ['-I', '-c', extractor, archive, stage, top, String(maximumExpandedBytes)], {
+        await execute('python3', ['-I', '-c', extractor, archive, stage, top, String(maximumExpandedBytes), template], {
             timeout: 600000, maxBuffer: 1024 * 1024
         });
     }
