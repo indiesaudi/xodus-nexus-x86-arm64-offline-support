@@ -4,6 +4,7 @@ import ts from 'typescript';
 import {expect,it,vi} from 'vitest';
 import {gameDetailsTarget} from './game-details-target';
 import {catalogDetailMarket,publicStoreMarket} from './public-store-market';
+import {bundleMembership,requestedProductIds,scopedStoreAccess} from './store-bundle-access';
 
 // Execute the actual public catalog IPC handlers. Everything is synthetic: no
 // Electron window, account, backend, license, network or game is started.
@@ -37,11 +38,13 @@ function fixture(mode:'main'|'demo'){
  const handlers=new Map<string,Function>(),products={query:'q',market:'US',products:[],hasMore:false,fetchedAt:'',source:'Microsoft Store'};
  // CZ desktop with settings.market 'neutral': the effective account region.
  let market='CZ';
- const catalog={search:vi.fn(async()=>products),featured:vi.fn(async()=>products),browse:vi.fn(async()=>products),gameDetails:vi.fn(async(productId:string)=>({productId,xboxTitleId:'123'}))};
+ const catalog={search:vi.fn(async()=>products),featured:vi.fn(async()=>products),browse:vi.fn(async()=>products),gameDetails:vi.fn(async(productId:string)=>({productId,xboxTitleId:'123'})),
+  // The scoped bundle lookup only runs for explicitly requested products.
+  bundleScope:vi.fn(async()=>[])};
  const homeGamePassShelf={get:vi.fn(async(market:string)=>({market,products:[],fetchedAt:'2026-11-04T10:00:00.000Z',source:'Microsoft Game Pass catalog'}))};
  const games=[{id:'owned-game',storeId:'9GGGGGGGGGGG',title:'Owned Game',path:'/synthetic/game'}];
  const store={games,settings:{market:'neutral'}};
- const accountLibrary={select:vi.fn(),get:vi.fn(async()=>({kind:'owned',products:[],accessByProductId:{}})),storeAccess:vi.fn(async(configuredMarket:string)=>({configuredMarket,account:'fixture',market,checkedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60_000).toISOString(),accessByProductId:{},backend:'/fixture/cli'}))};
+ const accountLibrary={select:vi.fn(),get:vi.fn(async()=>({kind:'owned',products:[],accessByProductId:{}})),peekAccess:vi.fn(()=>({})),storeAccess:vi.fn(async(configuredMarket:string)=>({configuredMarket,account:'fixture',market,checkedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60_000).toISOString(),accessByProductId:{},backend:'/fixture/cli'}))};
  const installPlans={get:vi.fn(async()=>({choices:[]}))};
  const gameActivities={select:vi.fn(),get:vi.fn(async()=>({status:'available'}))},gameAchievements={select:vi.fn(),get:vi.fn(async()=>({status:'available'}))};
  const installedTitleId=vi.fn(async()=> '456');
@@ -50,7 +53,8 @@ function fixture(mode:'main'|'demo'){
   requireBackend:()=>'/fixture/cli',safeProductId:(value:string)=>value,availableInstallBytes:async()=>1024,
   gameActivities,gameAchievements,installedTitleId,
   snapshot:()=>({settings:{market:'neutral'},auth:{username:'fixture'},backend:{binaryPath:'/fixture/cli'}}),
-  catalogMarket:()=>market,demoGames:games,demoArtwork:new Map(),demoAccountLibrary:vi.fn(),demoLocales:{},demoLaunchOptions:{}};
+  catalogMarket:()=>market,demoGames:games,demoArtwork:new Map(),demoAccountLibrary:vi.fn(),demoLocales:{},demoLaunchOptions:{},
+  requestedProductIds,scopedStoreAccess,bundleMembership};
  runInNewContext(mode==='main'?mainCode:demoCode,context);
  return {catalog,homeGamePassShelf,accountLibrary,installPlans,gameActivities,gameAchievements,setMarket:(value:string)=>market=value,call:(name:string,...args:unknown[])=>handlers.get(name)!(undefined,...args)};
 }
@@ -70,8 +74,10 @@ it('browses the neutral US Store on a CZ desktop while Store access keeps the ef
  expect(f.accountLibrary.select).not.toHaveBeenCalled();
  const access=await f.call('store-access');
  expect(access).toMatchObject({configuredMarket:'neutral',market:'CZ'});
- expect(f.accountLibrary.storeAccess).toHaveBeenCalledWith('neutral');
+ expect(f.accountLibrary.storeAccess).toHaveBeenCalledWith('neutral',undefined,[]);
  expect(f.accountLibrary.select).toHaveBeenCalledWith('fixture','/fixture/cli','CZ');
+ // An unscoped read never fetches bundle metadata for the whole catalog.
+ expect(f.catalog.bundleScope).not.toHaveBeenCalled();
 });
 
 it('uses the public market only for an explicit public Store scope and keeps every other target on the account market',async()=>{

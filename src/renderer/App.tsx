@@ -2,7 +2,7 @@ import {useComponentUpdates} from './ComponentUpdates';
 import {ManagedRuntimeSettings} from './ManagedRuntimeSettings';
 import {StatusDot} from './StatusDot';
 import {useGameRuntimeReady} from './useGameRuntimeReady';
-import {useStoreAccess} from './store-access';
+import {storeAccessBatches,useStoreAccess,useStoreAccessScopes} from './store-access';
 import {GameRuntimeFields} from './GameRuntimeFields';
 import {runtimeFamilyLabels,type InstalledRuntimeFamily,type GameRuntimeSelection} from '../shared/runtime-selection';
 import { CloudSaveWarning } from './CloudSaveWarning';
@@ -246,7 +246,7 @@ export function HomePage({ data, go, action, openGame, returnFocusKey, toast }: 
   const gamePass = useRecentGamePassShelf();
   const [gamePassProduct, setGamePassProduct] = useState<CatalogProduct>();
   const [gamePassOpen, setGamePassOpen] = useState(false);
-  const gamePassAccess = useStoreAccess(data, gamePassOpen);
+  const gamePassAccess = useStoreAccess(data, gamePassOpen, gamePassProduct ? [gamePassProduct] : []);
   const homeScroll = useRef(0);
   const gamePassWasOpen = useRef(false);
   useBrowserLayoutEffect(() => {
@@ -319,8 +319,8 @@ function CatalogSupportBadge({ product }: { product: CatalogProduct }) {
     aria-label={product.installability === 'unknown' ? ui("ui.package_support_unknown_12fe897") : undefined}>{product.installability === 'supported' ? 'PC' : product.installability === 'unknown' ? '?' : ui("ui.unsupported_5432465")}</span>;
 }
 
-export function StoreProductCard({ product, selected, disabled, label, select, install, licensed = false }: {
-  product: CatalogProduct; selected: boolean; disabled: boolean; label: string; licensed?: boolean;
+export function StoreProductCard({ product, selected, disabled, label, select, install, licensed = false, verify = false }: {
+  product: CatalogProduct; selected: boolean; disabled: boolean; label: string; licensed?: boolean; verify?: boolean;
   select: (product: CatalogProduct,openDetails?:boolean) => void; install: (product: CatalogProduct) => void;
 }) {
   const price=publicStorePrice(product);
@@ -332,7 +332,7 @@ export function StoreProductCard({ product, selected, disabled, label, select, i
       <div><GameTitle title={product.title} /><small>{product.publisher ?? product.productId}</small><span data-tooltip={price ? ui('store.us_price_context') : undefined}>{product.purchasePrice ?? ui("ui.price_unavailable_6a9e657")}{price ? ` · ${ui('store.us_price_short')}` : ''}{product.includedWith ? ` · ${product.includedWith}` : ''}</span></div>
     </button>
     {licensed ? <button className="catalog-card-install" data-gamepad-skip data-gamepad-card-action disabled={disabled} onClick={() => install(product)}>
-      {label === 'Preparing…' ? <LoaderCircle className="spin" /> : label === 'Installed' ? <Check /> : <Download />}{label}
+      {label === 'Preparing…' ? <LoaderCircle className="spin" /> : label === 'Installed' ? <Check /> : <Download />}{verify ? ui('ui.verify_and_install_27d773b') : label}
     </button> : <button className="catalog-card-install" data-gamepad-skip data-gamepad-card-action onClick={() => window.open(product.storeUrl ?? `https://www.xbox.com/games/store/p/${product.productId}`, '_blank')}>{ui("ui.store_page_9c667df")}</button>}
   </article>;
 }
@@ -350,7 +350,6 @@ export function StorePagination({ page, loading, error, load }: { page?: StoreLi
 
 export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot; toast: (value: Toast) => void; go: (page: Page) => void; initialQuery: string }) {
   const startPackageInstall = usePackageInstall();
-  const access = useStoreAccess(data);
   // The Store shows one paged list at a time: public search results, or the
   // featured landing page continued by the same collection feed.
   const [search, setSearch] = useState<(StoreListPage & { query: string })>();
@@ -381,6 +380,12 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
     wasOpen.current=detailOpen&&Boolean(selected);
   },[detailOpen,selected?.productId]);
   const [busy, setBusy] = useState<string>();
+  // Store access covers exactly the displayed feed (search, or the landing page
+  // continued by browse) plus the explicit selection, in bounded batches. The
+  // selected product is always requested first, never dropped by a cap.
+  const displayed = search ? search.products : [...(featured?.products ?? []), ...browse.products];
+  const accessBatches = useMemo(() => storeAccessBatches(displayed, selected), [displayed, selected]);
+  const access = useStoreAccessScopes(data, accessBatches);
 
   /** Drops every page-scoped search value instead of leaving it to a stale
    * request, so a later feed never inherits the previous query's state. */
@@ -518,11 +523,11 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
   }, [autoKey, listOnScreen, detailOpen]);
 
   async function install(product: CatalogProduct, target = installDestination(product)) {
-    if (!access.canInstall(product)) return;
+    if (!access.eligible(product)) return;
     setBusy(product.productId);
     try {
       const request={...catalogInstallRequest(product,target),source:'store' as const};
-      if (!await startPackageInstall(request, () => access.canInstall(product))) return;
+      if (!await startPackageInstall(request, () => access.eligible(product))) return;
       toast({ kind: 'success', message: ui("ui.xodus_is_checking_the_license_and_installing_be774b2", { game: product.title }) });
       go('downloads');
     } catch (error) { toast({ kind: 'error', message: errorMessage(error) }); }
@@ -536,7 +541,7 @@ export function StorePage({ data, toast, go, initialQuery }: { data: AppSnapshot
   const productGrid = (products: CatalogProduct[]) => <div className="catalog-grid" data-gamepad-grid>{products.map((product) => {
     const installed = isInstalled(product);
     return <StoreProductCard key={product.productId} product={product} selected={selected?.productId === product.productId}
-      licensed={access.canInstall(product)}
+      licensed={access.eligible(product)} verify={access.eligibility(product)==='verify'}
       disabled={product.installability !== 'supported' || Boolean(busy) || !data.backend.capabilities.streaming || installed || isQueued(product)}
       label={installed ? ui("ui.installed_f8b32f4") : isQueued(product) ? ui("ui.in_install_queue_7c818f2") : busy === product.productId ? ui("ui.preparing_5d1fa38") : ui("ui.install_569ca49")}
       select={selectProduct} install={install} />;
