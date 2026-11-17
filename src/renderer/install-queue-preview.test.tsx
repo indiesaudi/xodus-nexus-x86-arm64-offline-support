@@ -60,8 +60,8 @@ it('shows waiting artwork before its download starts and keeps the current game 
   const html = renderToStaticMarkup(<QueuePreview tasks={previewTasks([waiting, current])} games={[]} />);
   expect(html).toContain('data:image/png;base64,waiting'); expect(html).toContain('data:image/png;base64,current');
   const summary = renderToStaticMarkup(<InstallQueueShortcut downloads={[waiting, current]} games={[]} active={false} openQueue={() => {}} />);
-  expect(summary).toContain('Downloading (1/2)'); expect(summary).toContain('title="Sample game"');
-  expect(summary).toContain('data:image/png;base64,current'); expect(summary).not.toContain('title="Waiting game"');
+  expect(summary).toContain('Downloading (1/2)'); expect(summary).toContain('data-tooltip="Sample game"');
+  expect(summary).toContain('data:image/png;base64,current'); expect(summary).not.toContain('data-tooltip="Waiting game"');
 });
 
 it('keeps unknown and paused progress honest in the sidebar', () => {

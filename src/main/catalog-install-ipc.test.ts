@@ -3,13 +3,14 @@ import path from 'node:path';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
 import {expect,it,vi} from 'vitest';
-import {assertStoreOfferAccess} from './catalog-access.js';
+import {assertStoreBundleAccess,assertStoreOfferAccess} from './catalog-access.js';
+import {requestedProductIds,scopedStoreAccess} from './store-bundle-access.js';
 
 // Execute the actual main-process preparation, queue closure and resume IPC.
 // All side effects are synthetic; no Electron, account, backend or game starts.
 const source=readFileSync(new URL('./index.ts',import.meta.url),'utf8');
 const parsed=ts.createSourceFile('index.ts',source,ts.ScriptTarget.Latest,true);
-const names=new Set(['storeAccess','verifyStoreInstall','startInstall','prepareInstall']);
+const names=new Set(['storeAccessContext','assertStoreAccessContext','storeAccess','verifyStoreInstall','startInstall','prepareInstall']);
 const functions=parsed.statements.filter(node=>ts.isFunctionDeclaration(node)&&node.name&&names.has(node.name.text)).map(node=>node.getText(parsed)).join('\n');
 const start=source.indexOf("  ipcMain.handle('resume-download'",source.indexOf('function registerIpc():'));
 const resume=source.slice(start,source.indexOf("  ipcMain.handle('remove-download'",start));
@@ -20,9 +21,10 @@ function fixture(){
  let granted=true;
  const plan=vi.fn(async()=>({choices:[{supported:true,contentId:'content',kind:'Game',productId:id}]}));
  const run=vi.fn(async()=>{}),prepare=vi.fn(async()=>{});
- const context:any={componentUpdateAdmission:{assertAllowed:vi.fn()},path,assertStoreOfferAccess,authState:{stored:true,running:false,username:'store'},backend:{current:{binaryPath:'/backend',capabilities:{library:true,packageSelection:true,streamingControls:true}},externalDownloadRunning:async()=>false},
+ const context:any={componentUpdateAdmission:{assertAllowed:vi.fn()},path,assertStoreOfferAccess,assertStoreBundleAccess,requestedProductIds,scopedStoreAccess,
+  catalog:{bundleScope:vi.fn(async()=>[])},authState:{stored:true,running:false,username:'store'},backend:{current:{binaryPath:'/backend',capabilities:{library:true,packageSelection:true,streamingControls:true}},externalDownloadRunning:async()=>false},
   store:{settings:{market:'US',runtimeRoot:'/synthetic/runtime'},games:[],downloads,addDownload:async(task:any)=>{downloads.push(task);},updateDownload:async()=>{},removeDownload:async()=>{}},
-  currentMarket:()=> 'US',accountLibrary:{select:vi.fn(),storeAccess:async()=>({account:'store',backend:'/backend',market:'US',configuredMarket:'US',checkedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60_000).toISOString(),accessByProductId:granted?{[id]:'owned'}:{}})},
+  currentMarket:()=> 'US',accountLibrary:{select:vi.fn(),peekAccess:()=>({}),storeAccess:async()=>({account:'store',backend:'/backend',market:'US',configuredMarket:'US',checkedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60_000).toISOString(),accessByProductId:granted?{[id]:'owned'}:{}})},
   stopGameUpdateCheck:async()=>{},ensureIdle:()=>{},prepareSystemWallet:async()=>{},preparingInstall:false,gameOperation:undefined,requireBackend:()=>'/backend',safeProductId:(value:string)=>value,
   installPlans:{get:plan},installSelection:()=> 'content',contentParentForChoice:()=>undefined,prepareContentInstall:vi.fn(async()=> 'content-id'),assertInstallDestination:async(value:string)=>value,app:{getPath:()=>'/synthetic/user'},randomUUID:()=> 'queued-id',
   downloadCleanup:{prepare,inheritResume:async()=>{}},enrichDownloadCovers:async()=>{},installQueue:{enqueue:(job:any)=>jobs.push(job)},emitSnapshot:()=>{},shutdownStarted:false,runDownload:run,

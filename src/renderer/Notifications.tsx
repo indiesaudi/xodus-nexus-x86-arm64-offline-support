@@ -110,7 +110,7 @@ export function NotificationBell({notices,failed=false,unsupported=false,openNot
     return()=>{document.removeEventListener('pointerdown',outside);window.removeEventListener('keydown',escape,true);};
   },[open]);
   return <div className="notifications" ref={root}>
-    <button ref={bell} className="notification-bell" aria-label={count?ui('notifications.unread',{count}):ui('notifications.title')} title={ui('notifications.title')} aria-expanded={open} aria-controls={open?'notification-panel':undefined} onClick={()=>toggle(!open)}>
+    <button ref={bell} className="notification-bell" aria-label={count?ui('notifications.unread',{count}):ui('notifications.title')} data-tooltip={ui('notifications.title')} aria-expanded={open} aria-controls={open?'notification-panel':undefined} onClick={()=>toggle(!open)}>
       <Bell aria-hidden="true"/>{count>0?<span className="notification-badge" aria-hidden="true">{notificationBadge(count)}</span>:null}
     </button>
     {open?<section id="notification-panel" className="notification-panel" role="dialog" aria-label={ui('notifications.title')} data-gamepad-layer>

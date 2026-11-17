@@ -477,6 +477,15 @@ export interface RecentGamePassShelf {
 }
 
 export type LibraryAccess = 'owned' | 'gamepass' | 'other';
+/** An exact game child reachable through a validated forward membership path
+ * from one currently OWNED bundle offer. This only makes the game eligible for
+ * Xodus's own license check before any download; it is never ownership and
+ * never appears in `accessByProductId`. Game Pass access to a root is not
+ * ownership of that bundle and never establishes this eligibility. */
+export interface StoreBundleMember {
+  bundleProductId: string;
+  access: 'owned';
+}
 export interface StoreAccess {
   configuredMarket: string;
   account: string;
@@ -485,6 +494,9 @@ export interface StoreAccess {
   checkedAt: string;
   expiresAt: string;
   accessByProductId: Record<string, LibraryAccess>;
+  /** Requested Store products whose bundle membership was verified by the
+   * main process; the renderer cannot add entries. */
+  bundleMembershipByProductId?: Record<string, StoreBundleMember>;
 }
 export interface AccountLibraryPage {
   kind: 'all' | LibraryAccess;
@@ -684,7 +696,9 @@ export interface LauncherApi {
   getFeaturedCatalog(): Promise<CatalogSearchResult>;
   browseCatalog(cursor?: string): Promise<CatalogSearchResult>;
   getRecentGamePassShelf(): Promise<RecentGamePassShelf>;
-  getStoreAccess(): Promise<StoreAccess>;
+  /** Account access; the optional bounded product IDs additionally return
+   * main-process verified bundle membership for those products only. */
+  getStoreAccess(requested?: string[]): Promise<StoreAccess>;
   getAccountLibrary(kind: AccountLibraryPage['kind'], cursor?: string, refresh?: boolean, sort?: AccountLibraryPage['sort']): Promise<AccountLibraryPage>;
   startInstall(request: InstallRequest): Promise<string>;
   getInstallPlan(productId: string, destination?: string): Promise<InstallPlan>;

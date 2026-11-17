@@ -199,7 +199,9 @@ export class AccountLibrary {
     }
     return { checkedAt: cached.checkedAt, accessByProductId };
   }
-  async storeAccess(configuredMarket=this.identity?.market??'US'): Promise<StoreAccess> {
+  /** `scope` derives bundle membership for the requested products from public
+   * metadata. It runs inside this account snapshot and is re-validated after. */
+  async storeAccess(configuredMarket=this.identity?.market??'US', scope?: (access: StoreAccess, requested: string[]) => Promise<StoreAccess>, requested: string[] = []): Promise<StoreAccess> {
     const identity=this.identity,generation=this.generation;
     if(!identity)throw Error('Sign in before checking Store access.');
     const cached=await this.load();
@@ -215,7 +217,14 @@ export class AccountLibrary {
       if(row.status==='Active'&&!row.isTrial&&end>now)until=Math.min(until,end);
     }
     if(until<=Date.now())throw Error('Store access expired. Refresh this page.');
-    return {configuredMarket,account:identity.account,market:identity.market,checkedAt:cached.checkedAt,accessByProductId,backend:identity.binary,expiresAt:new Date(until).toISOString()};
+    const result: StoreAccess = {configuredMarket,account:identity.account,market:identity.market,checkedAt:cached.checkedAt,accessByProductId,backend:identity.binary,expiresAt:new Date(until).toISOString()};
+    if(!scope||!requested.length)return result;
+    const scoped=await scope(structuredClone(result),requested);
+    // The same captured snapshot must still be current: a reset, account/backend
+    // switch (including A to B to A) or expiry during the graph refuses the result.
+    if(generation!==this.generation||identity!==this.identity||cached!==this.cached||Date.now()>=until)
+      throw Error('Store access expired or the account changed. Refresh account access.');
+    return scoped;
   }
   async get(kind: Kind, cursor?: string, refresh = false, sort?: AccountLibraryPage['sort']): Promise<AccountLibraryPage> {
     if (kind !== 'all' && kind !== 'owned' && kind !== 'gamepass' && kind !== 'other') throw Error('Invalid library filter.');

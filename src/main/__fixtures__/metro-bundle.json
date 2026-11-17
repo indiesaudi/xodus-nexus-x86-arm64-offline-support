@@ -1,0 +1,473 @@
+{
+ "_note": "Sanitized minimal projection of public Microsoft Display Catalog metadata captured for issue 543 (PL market). Only product IDs, titles, SKU trial/preorder flags, bundled child IDs, package format/architecture/platform fields and RelatedProducts id/type pairs are kept. No account data, tokens, prices, artwork or raw responses.",
+ "market": "PL",
+ "Products": [
+  {
+   "ProductId": "9PLCPC32SWLZ",
+   "ProductType": "Game",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "Metro Saga Bundle"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": [
+      {
+       "RelatedProductId": "9NQFNM4489Q0",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9NLGV4SHZVZK",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9NQ387M27TMV",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9P60KL3MHCNH",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9NM5W1TDNQZ3",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9PMR5S8C53JV",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9N790C9FZ74V",
+       "RelationshipType": "Parent"
+      },
+      {
+       "RelatedProductId": "9PBW29W139S4",
+       "RelationshipType": "Parent"
+      }
+     ]
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [
+        {
+         "BigId": "9P60KL3MHCNH"
+        },
+        {
+         "BigId": "9NQFNM4489Q0"
+        },
+        {
+         "BigId": "9NLGV4SHZVZK"
+        },
+        {
+         "BigId": "9NQ387M27TMV"
+        },
+        {
+         "BigId": "9NM5W1TDNQZ3"
+        },
+        {
+         "BigId": "9PMR5S8C53JV"
+        },
+        {
+         "BigId": "9N790C9FZ74V"
+        },
+        {
+         "BigId": "9PBW29W139S4"
+        }
+       ],
+       "Packages": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "ProductId": "9NQ387M27TMV",
+   "ProductType": "Game",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "METRO 2033 Redux"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": [
+      {
+       "RelatedProductId": "9PLCPC32SWLZ",
+       "RelationshipType": "Bundle"
+      },
+      {
+       "RelatedProductId": "9NT97ZJRV60X",
+       "RelationshipType": "Bundle"
+      }
+     ]
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.Metro2033Redux_hmv7qcest37me"
+        },
+        {
+         "PackageFormat": "XVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Xbox"
+          }
+         ],
+         "PackageFamilyName": null
+        }
+       ]
+      }
+     }
+    },
+    {
+     "Sku": {
+      "SkuId": "0011",
+      "SkuType": "trial",
+      "Properties": {
+       "IsTrial": true,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.Metro2033Redux_hmv7qcest37me"
+        },
+        {
+         "PackageFormat": "XVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Xbox"
+          }
+         ],
+         "PackageFamilyName": null
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "ProductId": "9NM5W1TDNQZ3",
+   "ProductType": "Game",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "METRO Last Light Redux"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": [
+      {
+       "RelatedProductId": "9PLCPC32SWLZ",
+       "RelationshipType": "Bundle"
+      },
+      {
+       "RelatedProductId": "9NT97ZJRV60X",
+       "RelationshipType": "Bundle"
+      }
+     ]
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.MetroLastLightRedux_hmv7qcest37me"
+        },
+        {
+         "PackageFormat": "XVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Xbox"
+          }
+         ],
+         "PackageFamilyName": null
+        }
+       ]
+      }
+     }
+    },
+    {
+     "Sku": {
+      "SkuId": "0011",
+      "SkuType": "trial",
+      "Properties": {
+       "IsTrial": true,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.MetroLastLightRedux_hmv7qcest37me"
+        },
+        {
+         "PackageFormat": "XVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Xbox"
+          }
+         ],
+         "PackageFamilyName": null
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "ProductId": "9P60KL3MHCNH",
+   "ProductType": "Game",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "Metro Exodus (Windows)"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": []
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.ProjectWindfall_hmv7qcest37me"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "Sku": {
+      "SkuId": "0011",
+      "SkuType": "trial",
+      "Properties": {
+       "IsTrial": true,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.ProjectWindfall_hmv7qcest37me"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "ProductId": "9PBW29W139S4",
+   "ProductType": "Game",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "Metro Exodus Enhanced Edition"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": []
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.MetroExodusEnhancedEdition_hmv7qcest37me"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "Sku": {
+      "SkuId": "0011",
+      "SkuType": "trial",
+      "Properties": {
+       "IsTrial": true,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.MetroExodusEnhancedEdition_hmv7qcest37me"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "ProductId": "9NQFNM4489Q0",
+   "ProductType": "Durable",
+   "LocalizedProperties": [
+    {
+     "ProductTitle": "Metro Exodus - The Two Colonels (Windows)"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "RelatedProducts": [
+      {
+       "RelatedProductId": "9P60KL3MHCNH",
+       "RelationshipType": "addOnParent"
+      },
+      {
+       "RelatedProductId": "9P60KL3MHCNH",
+       "RelationshipType": "SellableBy"
+      }
+     ]
+    }
+   ],
+   "DisplaySkuAvailabilities": [
+    {
+     "Sku": {
+      "SkuId": "0010",
+      "SkuType": "full",
+      "Properties": {
+       "IsTrial": false,
+       "IsPreOrder": false,
+       "BundledSkus": [],
+       "Packages": [
+        {
+         "PackageFormat": "MSIXVC",
+         "Architectures": [
+          "x64"
+         ],
+         "PlatformDependencies": [
+          {
+           "PlatformName": "Windows.Desktop"
+          }
+         ],
+         "PackageFamilyName": "DeepSilver.MetroExodus-TheTwoColonels_hmv7qcest37me",
+         "MainPackageFamilyNameForDlc": "DeepSilver.ProjectWindfall_hmv7qcest37me"
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

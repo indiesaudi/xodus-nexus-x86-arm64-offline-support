@@ -40,7 +40,7 @@ export function PackageDialog({ plan, choose, destination }: { plan: InstallPlan
         <span><strong>{item.title}</strong><small>{item.platform || ui("ui.unknown_platform_9e67415")} · {item.packageFormat || ui("ui.unknown_format_b85b102")}{['GameAddOn', 'Durable'].includes(item.kind) ? ui("ui.add_on_a0e4463") : ''}{!item.supported ? ui("ui.unsupported_7f34e93") : ''}</small><small>{ui('package.estimate', { size: uiText(installByteLabel(item.downloadBytes)) })}</small><small>{ui('store.id', { id: item.productId })}</small></span>
       </label>)}</div>
       <div className="install-storage" aria-label={ui("ui.installation_storage_3b5f20c")}>
-        {destination ? <p className="install-destination" title={destination}>{destination}</p> : null}
+        {destination ? <p className="install-destination" data-tooltip={destination}>{destination}</p> : null}
         <dl><div><dt>{ui("ui.estimated_space_040a03c")}</dt><dd>{uiText(installByteLabel(estimated))}</dd></div><div><dt>{ui("ui.available_on_target_drive_6208a3b")}</dt><dd>{uiText(installByteLabel(plan.availableBytes))}</dd></div></dl>
         {lowSpace ? <p className="warning-text" role="status">{ui("ui.the_estimate_exceeds_available_space_existing_fi_6888550")}</p> : <small>{ui("ui.sizes_are_estimates_the_downloader_checks_actual_b6e47d1")}</small>}
       </div>
