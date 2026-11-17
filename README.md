@@ -174,7 +174,9 @@ but have not been verified and may encounter compatibility issues.
 | Game | Playable | Status |
 | --- | --- | --- |
 | Persona 3 Reload | Yes | Gameplay, network features and cloud saves work; expansion pass not recognized. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/317)) |
+| John Carpenter's Toxic Commando | Yes | Unreleased Standard runtime: connects to other players online. |
 | Forza Motorsport | Partial | Unreleased runtime: intro completed. Online play unverified. |
+| Forza Horizon 5 | Yes | Unreleased Standard runtime: playable; startup can be slow. Online play unverified. |
 | Age of Empires II: Definitive Edition | Yes | Unreleased runtime: single-player works; CachyOS startup verified. Dynasties of India: Bengalis selectable. Online play unverified. |
 | Age of Empires III: Definitive Edition | Yes | Unreleased runtime: works. Online play unverified. |
 | Age of Empires: Definitive Edition | Partial | Unreleased runtime: menu and sign-in work; Multiplayer and LAN menus enabled. Gameplay unverified. |
