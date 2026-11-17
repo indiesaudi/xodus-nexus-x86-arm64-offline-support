@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdtempSync, rmdirSync } from 'node:fs';
+import { chmodSync, constants, lstatSync, mkdtempSync, rmdirSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
@@ -11,9 +11,25 @@ const names = ['SteamAppId', 'SteamGameId', 'SteamOverlayGameId', 'STEAM_COMPAT_
   'SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT', 'SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD',
   'SteamVirtualGamepadInfo', 'SteamVirtualGamepadInfo_Proton'] as const;
 export type SteamLaunchEnvironment = Partial<Record<typeof names[number], string>>;
+/** Private marker published by the packaged launch wrapper, never a path. */
+const overlayFilterMarker = 'XODUS_NEXUS_STEAM_OVERLAY_FILTERED';
 interface LeaseAddress { socket: string; token: string }
-export interface SteamHandoff { environment: SteamLaunchEnvironment; lease: LeaseAddress }
+export interface SteamHandoff {
+  environment: SteamLaunchEnvironment;
+  lease: LeaseAddress;
+  /** True only when the sender's own launch wrapper removed the overlay. */
+  overlayFiltered?: true;
+}
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+
+/**
+ * Whether this very process had Steam's overlay library removed by the
+ * packaged launch wrapper before Electron started. Only the wrapper's exact
+ * marker counts; an absent, empty or any other value is not a filter.
+ */
+export function steamOverlayFiltered(env: NodeJS.ProcessEnv): boolean {
+  return env[overlayFilterMarker] === '1';
+}
 
 export function captureSteamLaunchEnvironment(env: NodeJS.ProcessEnv): SteamLaunchEnvironment | undefined {
   if (!env.SteamGameId || !/^[1-9][0-9]{0,19}$/.test(env.SteamGameId) || BigInt(env.SteamGameId) > 0xffffffffffffffffn) return;
@@ -28,18 +44,26 @@ export function captureSteamLaunchEnvironment(env: NodeJS.ProcessEnv): SteamLaun
   return result;
 }
 
+/**
+ * Validate a Steam shortcut handoff. Besides the bounded identity and lease,
+ * the sender may report only that its own launch wrapper filtered the overlay,
+ * as a strict boolean. No path, library name or other value is accepted, so a
+ * request can never choose what the game preloads.
+ */
 export function steamHandoffRequest(data: unknown): SteamHandoff | undefined {
   if (!object(data) || !Object.hasOwn(data, 'nexusSteam')) return;
   const value = data.nexusSteam;
-  if (!object(value) || Object.keys(value).some(key => !['environment', 'lease'].includes(key)) ||
+  if (!object(value) || Object.keys(value).some(key => !['environment', 'lease', 'overlayFiltered'].includes(key)) ||
       !object(value.environment) || Object.keys(value.environment).some(key => !(names as readonly string[]).includes(key)) ||
       Object.values(value.environment).some(item => typeof item !== 'string') || !object(value.lease) ||
       Object.keys(value.lease).some(key => !['socket', 'token'].includes(key)) ||
-      typeof value.lease.socket !== 'string' || typeof value.lease.token !== 'string' || !/^[a-f0-9]{64}$/.test(value.lease.token))
+      typeof value.lease.socket !== 'string' || typeof value.lease.token !== 'string' || !/^[a-f0-9]{64}$/.test(value.lease.token) ||
+      (value.overlayFiltered !== undefined && typeof value.overlayFiltered !== 'boolean'))
     throw Error('Invalid Steam shortcut handoff.');
   const environment = captureSteamLaunchEnvironment(value.environment as NodeJS.ProcessEnv);
   if (!environment) throw Error('Missing Steam shortcut identity.');
-  return { environment, lease: { socket: value.lease.socket, token: value.lease.token } };
+  return { environment, lease: { socket: value.lease.socket, token: value.lease.token },
+    ...(value.overlayFiltered === true ? { overlayFiltered: true } : {}) };
 }
 
 // Driver and DXVK cache locations the Steam client puts in a launched
@@ -79,10 +103,30 @@ export function steamGameEnvironment(base: NodeJS.ProcessEnv, context?: SteamLau
   return result;
 }
 
-/** Keep the Steam-launched secondary process alive without opening another UI.
- * Only a private, token-authenticated local connection can own this lifetime. */
+/**
+ * The Steam context of one game launch. A contextual shortcut request always
+ * wins, including an explicit false, because it describes the Steam launch
+ * that asked for this game. Only without one does the primary process's own
+ * Steam identity apply, and only when Steam started this very process. A
+ * desktop launch therefore never qualifies, and no paths are involved.
+ */
+export function gameSteamContext(context: {
+  request?: SteamGameContext;
+  primary?: { environment: SteamLaunchEnvironment; overlayFiltered: boolean };
+}): SteamGameContext | undefined {
+  if (context.request) return context.request;
+  if (!context.primary) return;
+  return { environment: context.primary.environment, overlayFiltered: context.primary.overlayFiltered, signal: new AbortController().signal };
+}
+
+/**
+ * Keep the Steam-launched secondary process alive without opening another UI.
+ * Only a private, token-authenticated local connection can own this lifetime.
+ * `overlayFiltered` reports only that this process's own launch wrapper
+ * removed the overlay; it is a boolean, never a path.
+ */
 export function offerSteamHandoff(environment: SteamLaunchEnvironment, onFinished: () => void,
-  timeoutMs = 90_000): { handoff: SteamHandoff; close(): void } {
+  timeoutMs = 90_000, overlayFiltered = false): { handoff: SteamHandoff; close(): void } {
   const directory = mkdtempSync(path.join(os.tmpdir(), `nexus-steam-${process.getuid?.() ?? 0}-`));
   chmodSync(directory, 0o700);
   const socket = path.join(directory, 'launch.sock');
@@ -121,10 +165,12 @@ export function offerSteamHandoff(environment: SteamLaunchEnvironment, onFinishe
   // permissions must be private before returning, not in the listen callback.
   try { server.listen(socket); chmodSync(socket, 0o600); }
   catch (error) { close(); throw error; }
-  return { handoff: { environment, lease: { socket, token } }, close };
+  return { handoff: { environment, lease: { socket, token }, ...(overlayFiltered ? { overlayFiltered: true as const } : {}) }, close };
 }
 
 export interface SteamLaunchLease { signal: AbortSignal; close(): void }
+/** Request-local Steam context of one game launch; the boolean is never a path. */
+export interface SteamGameContext { environment: SteamLaunchEnvironment; overlayFiltered: boolean; signal: AbortSignal }
 export async function acceptSteamHandoff(handoff: SteamHandoff): Promise<SteamLaunchLease> {
   const address = handoff.lease;
   const directory = path.dirname(address.socket);
@@ -158,4 +204,24 @@ export async function acceptSteamHandoff(handoff: SteamHandoff): Promise<SteamLa
     });
     return { signal: controller.signal, close: () => peer.end() };
   } catch (error) { peer.destroy(); throw error; }
+}
+
+/**
+ * Steam's overlay libraries inside one trusted Steam installation root. The
+ * modern Steam Linux Runtime pair wins; the legacy pair is used only when the
+ * modern one is incomplete. Both architectures must exist, and no path is ever
+ * taken from a launch request or another process.
+ */
+export async function steamOverlayLibraries(steamRoot: string): Promise<string[] | undefined> {
+  for (const directories of [['steamrt64', 'steamrt32'], ['ubuntu12_64', 'ubuntu12_32']]) {
+    const libraries = directories.map(directory => path.join(steamRoot, directory, 'gameoverlayrenderer.so'));
+    try {
+      for (const file of libraries) {
+        await fs.access(file, constants.R_OK);
+        if (!(await fs.stat(file)).isFile()) throw new Error('Not an overlay library.');
+      }
+      return libraries;
+    } catch { /* Try the other pair; an incomplete installation is not usable. */ }
+  }
+  return undefined;
 }
