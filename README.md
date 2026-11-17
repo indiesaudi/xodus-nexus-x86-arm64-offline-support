@@ -53,6 +53,13 @@ For an application-menu installation on supported distributions:
 curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh | bash
 ```
 
+The installer asks whether to install a fresh copy or upgrade an existing
+installation. For noninteractive use, pass `--install` or `--upgrade` after
+`bash -s --`, for example
+`curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh | bash -s -- --upgrade`.
+By default, it installs the latest stable release and keeps existing games,
+saves, settings, accounts and runtimes.
+
 On first startup, the launcher installs and verifies the **Nexus backend** in
 the background so you can sign in during setup. Install the **Nexus Runtime**
 from **Settings** before launching games. A valid purchase or subscription is required.

@@ -143,3 +143,35 @@ test('keeps a command symlink that points outside the installation', async t => 
   assert.equal(await fs.readlink(f.command), external);
   assert.equal(await fs.readFile(external, 'utf8'), 'other'); await f.kept();
 });
+
+test('env Exec from the current installer is removed without touching saved data', async t => {
+  const f = await fixture(t, true);
+  const quote = value => `"${value.replaceAll('\\', '\\\\\\\\').replaceAll('"', '\\\\"').replaceAll('`', '\\\\`').replaceAll('$', '\\\\$').replaceAll('%', '%%')}"`;
+  await fs.writeFile(f.desktop, `[Desktop Entry]\nName=Nexus Launcher\nExec=/usr/bin/env -- ${quote(f.command)} %U\nIcon=${f.app}/icon.png\n`);
+  const result = f.run(); assert.equal(result.status, 0, result.stderr);
+  await absent(f.image); await absent(f.command); await absent(f.desktop); await f.kept();
+});
+
+test('a quoted entry for a different command is preserved', async t => {
+  const f = await fixture(t, true);
+  await fs.writeFile(f.desktop, `[Desktop Entry]\nName=Nexus Launcher\nExec="/opt/other/bin/xodus-nexus" %U\nIcon=${f.app}/icon.png\n`);
+  const result = f.run(); assert.equal(result.status, 0, result.stderr);
+  assert.match(await fs.readFile(f.desktop, 'utf8'), /\/opt\/other\/bin\/xodus-nexus/);
+  await absent(f.image); await f.kept();
+});
+
+test('legacy quoted direct Exec is still removed', async t => {
+  const f = await fixture(t, true);
+  const quote = value => `"${value.replaceAll('\\', '\\\\\\\\').replaceAll('"', '\\\\"').replaceAll('`', '\\\\`').replaceAll('$', '\\\\$').replaceAll('%', '%%')}"`;
+  await fs.writeFile(f.desktop, `[Desktop Entry]\nName=Nexus Launcher\nExec=${quote(f.command)} %U\nIcon=${f.app}/icon.png\n`);
+  const result = f.run(); assert.equal(result.status, 0, result.stderr);
+  await absent(f.image); await absent(f.command); await absent(f.desktop); await f.kept();
+});
+
+test('a foreign env command is preserved', async t => {
+  const f = await fixture(t, true);
+  await fs.writeFile(f.desktop, `[Desktop Entry]\nName=Nexus Launcher\nExec=/usr/bin/env -- "/opt/other/bin/xodus-nexus" %U\nIcon=${f.app}/icon.png\n`);
+  const result = f.run(); assert.equal(result.status, 0, result.stderr);
+  assert.match(await fs.readFile(f.desktop, 'utf8'), /\/opt\/other\/bin\/xodus-nexus/);
+  await absent(f.image); await f.kept();
+});
