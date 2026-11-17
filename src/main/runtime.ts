@@ -484,7 +484,7 @@ export class RuntimeManager {
           await this.managed.downloadPreparedRelease(release, lease.root, archive, { allowCachyos: false, allowPrerelease: target.channel === 'prerelease' });
           const extracted = path.join(staging, 'payload');
           await fs.mkdir(extracted, { mode: 0o700 });
-          const name = nexusReleaseName(release.assets.binary.name), payload = await materializeRuntimeArchive(archive, extracted, name);
+          const name = nexusReleaseName(release.assets.binary.name), payload = await materializeRuntimeArchive(archive, extracted, name, undefined, release.arch === 'arm64' ? 'default_pfx_arm64' : 'default_pfx');
           const file = path.join(payload, 'XODUS_NEXUS_PATCH.json'), stat = await fs.lstat(file);
           if (!stat.isFile() || stat.size > 2 * 1024 * 1024)
               throw Error('Missing bounded runtime source metadata');

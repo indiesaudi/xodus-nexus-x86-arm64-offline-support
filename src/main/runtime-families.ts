@@ -1,7 +1,7 @@
 import {constants,createReadStream,promises as fs} from 'node:fs';
 import {createHash,randomUUID} from 'node:crypto';
 import path from 'node:path';
-import {gameRuntimeSelection,runtimeFamilies,runtimeFamilyLabels,type RuntimeFamily,type InstalledRuntimeFamily,runtimeBuildApproval,sameRuntimeBuild,type RuntimeBuildApproval} from '../shared/runtime-selection.js';
+import {gameRuntimeSelection,runtimeFamilies,runtimeFamilyLabels,runtimeFamilyArch,type RuntimeFamily,type InstalledRuntimeFamily,runtimeBuildApproval,sameRuntimeBuild,type RuntimeBuildApproval} from '../shared/runtime-selection.js';
 const repositories:Record<RuntimeFamily,string>={nexus:'domsvoboda/nexus-runtime','nexus-cachyos':'domsvoboda/nexus-runtime-cachyos'};
 const digest=(bytes:Buffer)=>createHash('sha256').update(bytes).digest('hex');
 const NEXUS_CI_COMPAT_SOURCE = 'efa482d163cbd299602bce12317d863a1fda384c';
@@ -19,6 +19,62 @@ async function fileDigest(file:string) {
 const hash=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const commit=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{40}$/.test(value);
 const within=(root:string,file:string)=>{const relative=path.relative(root,file);return Boolean(relative)&&!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative);};
+/** Files that every verified managed family payload must carry, per exact
+ * payload architecture. The loader/server directory, pristine prefix and the
+ * primary PE module directory come from the producer's target: x64 uses
+ * `bin`/`default_pfx`/`x86_64-windows`, ARM64 uses
+ * `bin-arm64`/`default_pfx_arm64`/`aarch64-windows` while keeping the emulated
+ * i386 and x86_64 module directories. */
+const launchLayouts=Object.freeze({
+  x64:{bin:'files/bin',prefix:'files/share/default_pfx',primaryPe:'x86_64'},
+  arm64:{bin:'files/bin-arm64',prefix:'files/share/default_pfx_arm64',primaryPe:'aarch64'},
+} as const);
+const familyModules=['xgameruntime.dll','winhttp.dll','libnghttp2.dll'];
+/** Module directories the contract requires. The x64 contract keeps its
+ * original x86_64 + i386 set. The ARM64 contract additionally requires the
+ * primary aarch64 modules plus the emulated x86_64 (ARM64EC) and i386 (WoW64/FEX)
+ * modules, because games load x86 binaries through them. */
+const requiredModuleDirs=Object.freeze({x64:['x86_64','i386'],arm64:['aarch64','x86_64','i386']} as const);
+function criticalPayload(arch:'x64'|'arm64'):string[] {
+  const layout=launchLayouts[arch];
+  return ['proton',layout.bin+'/wine',layout.bin+'/wineserver',layout.bin+'/wine.nexus-original','XODUS_NEXUS_PATCH.json',
+    ...['PlayFabGameSave.dll','gaming-services-version.exe','package-registration.exe'].map(name=>'files/share/xodus-nexus/compat/'+name),
+    ...requiredModuleDirs[arch].flatMap(cpu=>familyModules.map(name=>`files/lib/wine/${cpu}-windows/${name}`))];
+}
+/** The only absolute link a managed payload may contain: the inert Z: drive
+ * mapping of this architecture's own default template. x64 has only
+ * default_pfx and ARM64 only default_pfx_arm64, so the exception cannot be
+ * borrowed from the other architecture's prefix. */
+const templateMappings=Object.freeze({x64:'files/share/default_pfx/dosdevices/z:',arm64:'files/share/default_pfx_arm64/dosdevices/z:'} as const);
+const templateMapping=(name:string,target:unknown,arch:'x64'|'arm64'):boolean=>name===templateMappings[arch]&&target==='/';
+/** Build identity metadata that an ARM64 payload may declare. It must agree
+ * with the verified architecture and the producer's fixed target layout; an
+ * x64 manifest that starts claiming ARM64 layout is rejected. */
+function arm64Metadata(metadata:Record<string,unknown>):void {
+  if(metadata.targetArchitecture!=='arm64')throw Error('ARM64 runtime payload must declare its target architecture');
+  if(metadata.binDirectory!=='bin-arm64'||metadata.defaultPrefix!=='default_pfx_arm64')throw Error('ARM64 runtime payload declares a different launcher layout');
+  const components=metadata.componentsByArch;
+  if(!components||typeof components!=='object'||Array.isArray(components)||typeof (components as Record<string,unknown>)['aarch64-windows']!=='object'||(components as Record<string,unknown>)['aarch64-windows']===null)throw Error('ARM64 runtime payload must bind its aarch64-windows modules');
+}
+/** Native ARM64 entry points. Only the ARM64 family is inspected: a payload of
+ * the other host architecture can never be launched as this native runtime. */
+const ARM64_LOADERS=Object.freeze(['files/bin-arm64/wine','files/bin-arm64/wineserver','files/bin-arm64/wine.nexus-original']);
+const ELF_MAGIC=Buffer.from([0x7f,0x45,0x4c,0x46]),EM_AARCH64=183;
+/** A real 64-bit little-endian aarch64 ELF header. The whole identification
+ * block is validated, not just e_machine: magic, EI_CLASS=2, EI_DATA=1,
+ * EI_VERSION=1 and e_machine 183. A 64-byte non-ELF blob or an x86_64 header is
+ * rejected. The check is capped at the first 64 bytes of a regular file. */
+async function isArm64Elf(file:string):Promise<boolean> {
+  if(!(await fs.lstat(file)).isFile())return false;
+  const handle=await fs.open(file,constants.O_RDONLY|constants.O_NOFOLLOW);
+  try{
+    const header=Buffer.alloc(64),{bytesRead}=await handle.read(header,0,64,0);
+    return bytesRead===64&&header.subarray(0,4).equals(ELF_MAGIC)&&header[4]===2&&header[5]===1&&header[6]===1&&header.readUInt16LE(18)===EM_AARCH64;
+  }finally{await handle.close();}
+}
+async function verifyArm64Loaders(base:string):Promise<void> {
+  for(const name of ARM64_LOADERS)if(!await isArm64Elf(path.join(base,name)))throw Error('ARM64 runtime loader is not a native aarch64 executable: '+name);
+}
 export interface ResolvedRuntimeFamily extends InstalledRuntimeFamily {
   readonly winePath:string;readonly root:string;readonly arch:'x64'|'arm64';readonly prefixSchema:1;readonly manifestSha256:string;
 }
@@ -42,7 +98,8 @@ async function receiptFile(runtimeRoot:string,id:RuntimeFamily,approved?:Readonl
 async function verifyRuntimeFamily(runtimeRoot:string,selection:unknown,arch:string=process.arch,approved?:Readonly<RuntimeBuildApproval>):Promise<Readonly<ResolvedRuntimeFamily>> {
   const id=gameRuntimeSelection(selection);
   if(id==='default')throw Error('Default runtime resolution requires the existing global runtime.');
-  if(!['x64','arm64'].includes(arch))throw Error('Unsupported runtime architecture.');
+  // No managed family payload exists for any other host, so no fallback.
+  if(arch!=='x64'&&arch!=='arm64')throw Error('Unsupported runtime architecture.');
   try {
     const managedRoot=await fs.realpath(runtimeRoot);
     const directory=path.join(runtimeRoot,'variants',id);
@@ -65,6 +122,13 @@ export interface RuntimeFamilyReceipt {schema:1;family:RuntimeFamily;sourceRepos
  * published archive; this function never adopts a folder or writes receipts. */
 export async function verifyRuntimeFamilyPayload(root:string,pointer:RuntimeFamilyReceipt,arch:string=process.arch):Promise<Readonly<ResolvedRuntimeFamily>> {
   const id=pointer.family;
+  // The requested host architecture is validated before any payload path is
+  // derived; an archive of another architecture is never used as a fallback.
+  const payloadArch=runtimeFamilyArch(arch);
+  // The reviewed ARM64 payload contract exists for the Standard family only. An
+  // ARM64 CachyOS receipt/manifest is refused here as well, so no future or
+  // hand-written receipt can adopt one; there is no fallback to another family.
+  if(payloadArch==='arm64'&&id==='nexus-cachyos')throw Error('ARM64 managed runtime is available for the Standard runtime only');
   if(!runtimeFamilies.includes(id)||pointer.schema!==1||pointer.sourceRepository!==repositories[id]||!commit(pointer.sourceCommit)||!hash(pointer.manifestSha256)||!hash(pointer.buildId))throw Error('Invalid managed runtime receipt');
   if(!(await fs.lstat(root)).isDirectory())throw Error('Runtime root must be a real directory');
   // Callers may supply a lexical staging or destination path whose ancestors
@@ -75,15 +139,13 @@ export async function verifyRuntimeFamilyPayload(root:string,pointer:RuntimeFami
     const bytes=await fs.readFile(path.join(base,'nexus-family.json'));
     if(digest(bytes)!==pointer.manifestSha256)throw Error('Runtime manifest checksum mismatch');
     const manifest=JSON.parse(bytes.toString('utf8'));
-    if(manifest.schema!==1||manifest.family!==id||manifest.sourceRepository!==repositories[id]||manifest.sourceCommit!==pointer.sourceCommit||manifest.buildId!==pointer.buildId||manifest.arch!==arch||manifest.prefixSchema!==1||!manifest.files||Array.isArray(manifest.files)||typeof manifest.files!=='object')throw Error('Runtime manifest identity mismatch');
+    if(manifest.schema!==1||manifest.family!==id||manifest.sourceRepository!==repositories[id]||manifest.sourceCommit!==pointer.sourceCommit||manifest.buildId!==pointer.buildId||manifest.arch!==payloadArch||manifest.prefixSchema!==1||!manifest.files||Array.isArray(manifest.files)||typeof manifest.files!=='object')throw Error('Runtime manifest identity mismatch');
     const compatLicense=id==='nexus'&&pointer.schema===1&&pointer.sourceCommit===NEXUS_CI_COMPAT_SOURCE?NEXUS_CI_COMPAT_LICENSE:{};
-    const loader=arch==='arm64'?'files/bin-arm64/wine':'files/bin/wine';
-    const server=arch==='arm64'?'files/bin-arm64/wineserver':'files/bin/wineserver';
-    // Installer manifests must cover the Proton entry point and complete payload.
-    const critical=['proton',loader,server,loader+'.nexus-original','XODUS_NEXUS_PATCH.json',
-      ...['PlayFabGameSave.dll','gaming-services-version.exe','package-registration.exe'].map(name=>'files/share/xodus-nexus/compat/'+name),
-      ...['x86_64','i386'].flatMap(cpu=>['xgameruntime.dll','winhttp.dll','libnghttp2.dll'].map(name=>`files/lib/wine/${cpu}-windows/${name}`))];
-    if(arch==='arm64')throw Error('Experimental managed variants require a separately reviewed ARM64 payload contract');
+    const layout=launchLayouts[payloadArch],loader=layout.bin+'/wine',server=layout.bin+'/wineserver';
+    // Installer manifests must cover the Proton entry point and complete payload
+    // of this exact architecture: the native loader/server, the ARM64 primary
+    // aarch64 modules plus the emulated x86_64 and i386 modules when applicable.
+    const critical=criticalPayload(payloadArch);
     for(const required of critical)if(!hash(manifest.files[required]))throw Error('Runtime launch file missing');
     for(const [name,expected] of Object.entries(manifest.files)) {
       if(!hash(expected)||!name||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..')||path.isAbsolute(name))throw Error('Unsafe runtime manifest path');
@@ -92,12 +154,11 @@ export async function verifyRuntimeFamilyPayload(root:string,pointer:RuntimeFami
       if(!within(base,target)||(await fs.stat(target)).isFile()!==true||await fileDigest(target)!==expected)throw Error('Runtime payload checksum mismatch');
     }
     const symlinks=manifest.symlinks??{};
-    const templateMapping=(name:string,target:unknown)=>name==='files/share/default_pfx/dosdevices/z:'&&target==='/';
     if(!symlinks||Array.isArray(symlinks)||typeof symlinks!=='object')throw Error('Invalid runtime symlink inventory');
     for(const [name,target] of Object.entries(symlinks)) {
-      if(typeof target!=='string'||!target||path.isAbsolute(target)&&!templateMapping(name,target)||!name||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..')||path.isAbsolute(name)||name in manifest.files)throw Error('Unsafe runtime symlink path');
+      if(typeof target!=='string'||!target||path.isAbsolute(target)&&!templateMapping(name,target,payloadArch)||!name||name.includes('\\')||name.split('/').some(part=>!part||part==='.'||part==='..')||path.isAbsolute(name)||name in manifest.files)throw Error('Unsafe runtime symlink path');
       const file=path.join(base,name);
-      if(!(await fs.lstat(file)).isSymbolicLink()||await fs.readlink(file)!==target||!within(base,await fs.realpath(path.dirname(file)))||!templateMapping(name,target)&&!within(base,await fs.realpath(file)))throw Error('Runtime symlink leaves verified payload');
+      if(!(await fs.lstat(file)).isSymbolicLink()||await fs.readlink(file)!==target||!within(base,await fs.realpath(path.dirname(file)))||!templateMapping(name,target,payloadArch)&&!within(base,await fs.realpath(file)))throw Error('Runtime symlink leaves verified payload');
     }
     const inventory:string[]=[];
     const walk=async(directory:string)=>{for(const item of await fs.readdir(directory,{withFileTypes:true})){
@@ -116,13 +177,28 @@ export async function verifyRuntimeFamilyPayload(root:string,pointer:RuntimeFami
     }
     const metadata=JSON.parse(await fs.readFile(path.join(base,'XODUS_NEXUS_PATCH.json'),'utf8'));
     if(metadata.schema!==1||!hash(metadata.sourceLockSha256)||!metadata.sourceGraph||typeof metadata.sourceGraph!=='object'||metadata.sourceGraph.proton!==pointer.sourceCommit||metadata.sourceLockSha256!==manifest.sourceLockSha256)throw Error('Runtime source graph is not bound');
-    if(!(await fs.stat(path.join(base,'files/share/default_pfx'))).isDirectory())throw Error('Runtime default prefix missing');
+    if(payloadArch==='arm64')arm64Metadata(metadata as Record<string,unknown>);
+    // The pristine prefix directory must be the one this architecture's Proton
+    // layout uses (default_pfx or default_pfx_arm64), as a real directory.
+    if(!(await fs.stat(path.join(base,layout.prefix))).isDirectory())throw Error('Runtime default prefix missing');
     const winePath=path.join(base,loader);
     for(const file of [winePath,path.join(base,'proton'),path.join(base,server)]) {
       if(!(await fs.lstat(file)).isFile())throw Error('Runtime launcher cannot be a symlink');
       await fs.access(file,constants.X_OK);
     }
-    return Object.freeze({id,label:runtimeFamilyLabels[id],buildId:pointer.buildId,sourceCommit:pointer.sourceCommit,winePath,root:base,arch:arch as 'x64'|'arm64',prefixSchema:1,manifestSha256:pointer.manifestSha256});
+    // An ARM64 payload must reach this point only with native aarch64 entry
+    // points, including when it is a staged payload about to be adopted.
+    if(payloadArch==='arm64')await verifyArm64Loaders(base);
+    return Object.freeze({id,label:runtimeFamilyLabels[id],buildId:pointer.buildId,sourceCommit:pointer.sourceCommit,winePath,root:base,arch:payloadArch,prefixSchema:1,manifestSha256:pointer.manifestSha256});
+}
+
+/** ARM64-native entry points, applied to a freshly verified installed payload
+ * and to every cache hit. x64 resolution is unchanged: the x64 payload contract
+ * has no native-header requirement, so no x64 behaviour is added or altered.
+ * The archive-staging verifier calls the same check before a payload is adopted
+ * into the managed tree. */
+async function verifyArm64NativeEntrypoints(value:Readonly<ResolvedRuntimeFamily>):Promise<void> {
+  if(value.arch==='arm64')await verifyArm64Loaders(value.root);
 }
 // A cache hit still checks identities and the complete inventory, but never
 // reads payload contents. Receipt/manifest/root changes, additions, removals,
@@ -169,11 +245,15 @@ async function resolveVerifiedRuntimeFamily(runtimeRoot:string,selection:unknown
       const before=await runtimeFingerprint(runtimeRoot,id,approved);
       const previous=verified.get(key);
       if(previous?.fingerprint===before){
+        // The ARM64 native header is re-read on every resolution, cache hit or
+        // not, so a loader swapped on disk can never be launched from a hit.
+        await verifyArm64NativeEntrypoints(previous.value);
         if(await runtimeFingerprint(runtimeRoot,id,approved)!==before)throw Error('Runtime changed during cached verification.');
         cacheHits++;return previous.value;
       }
       verified.delete(key);fullPasses++;
       const value=await verifyRuntimeFamily(runtimeRoot,id,arch,approved);
+      await verifyArm64NativeEntrypoints(value);
       if(await runtimeFingerprint(runtimeRoot,id,approved)!==before)throw Error('Runtime changed during verification. Retry after installation finishes.');
       verified.set(key,{fingerprint:before,value});
       while(verified.size>8)verified.delete(verified.keys().next().value!);
