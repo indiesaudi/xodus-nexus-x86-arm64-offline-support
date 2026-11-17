@@ -7,9 +7,9 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-  FULL_MODE, MODES, NATIVE_COMPILATION_FIXTURES, SOURCE_ONLY_MARKER, SOURCE_ONLY_MODE,
-  buildPlan, hasSourceOnlyMarker, listCompilingFixtures, modeOutputLine, omissionReport,
-  parseRuntimeToolFiles, readEventPayload, resolveMode, sourceOnlyMarkerLocation,
+  FULL_MODE, MODES, NATIVE_COMPILATION_FIXTURES, SOURCE_ONLY_MODE,
+  buildPlan, listCompilingFixtures, modeOutputLine, omissionReport,
+  parseRuntimeToolFiles, readEventPayload, resolveMode,
   writeGithubOutput,
 } from './source-check-plan.mjs';
 
@@ -23,7 +23,7 @@ const runtimeToolsScript = () => packageJson().scripts['test:runtime-tools'];
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
   for (const key of ['NEXUS_SOURCE_CHECK_MODE', 'NEXUS_EVENT_NAME', 'NEXUS_EVENT_PATH',
-    'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY']) delete env[key];
+    'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REF', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY']) delete env[key];
   return { ...env, ...extra };
 }
 
@@ -96,48 +96,34 @@ test('source-only fails closed on a future compiling fixture not in the manifest
     ['spawns-compiler.test.mjs', 'requires-compiler.test.mjs']);
 });
 
-test('push and pull request markers select source-only mode from their own field', () => {
-  assert.equal(resolveMode('push', { head_commit: { message: '[source-only] Sync sources' } }), SOURCE_ONLY_MODE);
-  assert.equal(resolveMode('push', { head_commit: { message: 'Ordinary integration' } }), FULL_MODE);
-  assert.equal(resolveMode('pull_request', { pull_request: { title: '[source-only] Sync sources' } }), SOURCE_ONLY_MODE);
-  assert.equal(resolveMode('pull_request', { pull_request: { title: 'Ordinary integration' } }), FULL_MODE);
-  assert.equal(sourceOnlyMarkerLocation('push', { head_commit: { message: '[source-only] x' } }), 'push head commit message');
-  assert.equal(sourceOnlyMarkerLocation('pull_request', { pull_request: { title: '[source-only] x' } }), 'pull request title');
-  assert.equal(sourceOnlyMarkerLocation('pull_request', { pull_request: { title: 'x' } }), null);
+test('only an explicit manual dispatch on main selects the full native plan', () => {
+  assert.equal(resolveMode('workflow_dispatch', 'refs/heads/main'), FULL_MODE);
+  for (const ref of ['refs/heads/develop', 'refs/heads/feature/example', 'refs/heads/fix/example', 'refs/tags/v1', ''])
+    assert.equal(resolveMode('workflow_dispatch', ref), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('workflow_dispatch', undefined), SOURCE_ONLY_MODE);
 });
 
-test('marker fields do not leak across events and default stays full', () => {
-  assert.equal(resolveMode('push', { pull_request: { title: '[source-only] x' } }), FULL_MODE);
-  assert.equal(resolveMode('pull_request', {
-    head_commit: { message: '[source-only] x' },
-    pull_request: { title: 'Ordinary integration' },
-  }), FULL_MODE);
-  assert.equal(resolveMode('pull_request', {
-    pull_request: { title: 'Ordinary integration', body: '[source-only] x' },
-  }), FULL_MODE);
-  assert.equal(resolveMode('workflow_dispatch', {}), FULL_MODE);
-  assert.equal(resolveMode('', {}), FULL_MODE);
-  assert.equal(resolveMode('push', {}), FULL_MODE);
-  assert.equal(resolveMode('pull_request', {}), FULL_MODE);
-  assert.equal(resolveMode('push', { head_commit: { message: null } }), FULL_MODE);
-  assert.equal(resolveMode('pull_request', { pull_request: { title: 123 } }), FULL_MODE);
-  assert.equal(hasSourceOnlyMarker('[Source-Only] x'), false);
+test('ordinary push and pull request events never compile or package', () => {
+  for (const ref of ['refs/heads/main', 'refs/heads/develop', 'refs/heads/feature/example'])
+    assert.equal(resolveMode('push', ref), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('pull_request', 'refs/heads/main'), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('', ''), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('schedule', 'refs/heads/main'), SOURCE_ONLY_MODE);
+});
+
+test('commit messages and pull request titles cannot promote a build', () => {
+  // resolveMode only accepts the event name and the trusted runner ref, so
+  // commit/PR text has no path to select a build mode. The CLI test below
+  // proves hostile payload text is ignored.
+  assert.equal(resolveMode('push', 'refs/heads/main'), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('pull_request', 'refs/heads/main'), SOURCE_ONLY_MODE);
+  assert.equal(resolveMode('workflow_dispatch', 'refs/heads/main'), FULL_MODE);
 });
 
 test('hostile event text cannot change the selected mode or reach the output file', () => {
-  const hostile = [
-    '$(touch pwned)',
-    '`touch pwned`',
-    "'; touch pwned; '",
-    'x\nmode=full',
-    '[source-only]\n$(touch pwned)',
-    '\u202e[source-only]',
-  ];
-  for (const title of hostile) {
-    const mode = resolveMode('pull_request', { pull_request: { title } });
-    assert.ok(MODES.includes(mode));
-    assert.equal(mode, title.includes(SOURCE_ONLY_MARKER) ? SOURCE_ONLY_MODE : FULL_MODE);
-  }
+  // The resolver has no text input; the CLI test below proves payload text is
+  // ignored and only the allowlisted literal mode reaches the output file.
+  assert.equal(resolveMode('pull_request', 'refs/heads/main'), SOURCE_ONLY_MODE);
   assert.equal(modeOutputLine(SOURCE_ONLY_MODE), 'mode=source-only\n');
   assert.equal(modeOutputLine(FULL_MODE), 'mode=full\n');
   for (const mode of ['source_only', 'full\nINJECTED=1', 'source-only\r\nmode=full'])
@@ -196,39 +182,42 @@ test('malformed event JSON fails closed instead of selecting a silent mode', () 
   }
 });
 
-test('resolve-mode publishes only a literal mode from the event payload', () => {
+test('resolve-mode trusts the runner ref, not the event payload ref', () => {
   const fixture = tempFixture();
   try {
     const event = fixture.join('event.json');
     const output = fixture.join('output');
     fs.writeFileSync(output, '');
-    const resolve = (name, payload) => {
+    const resolve = (name, payload, runnerRef) => {
       fs.writeFileSync(event, JSON.stringify(payload));
       fs.writeFileSync(output, '');
-      const result = runCli(['resolve-mode'], {
-        NEXUS_EVENT_NAME: name, NEXUS_EVENT_PATH: event, GITHUB_OUTPUT: output,
-      });
+      const env = { NEXUS_EVENT_NAME: name, NEXUS_EVENT_PATH: event, GITHUB_OUTPUT: output };
+      if (runnerRef !== undefined) env.GITHUB_REF = runnerRef;
+      const result = runCli(['resolve-mode'], env);
       assert.equal(result.status, 0, result.stderr);
       return { result, written: fs.readFileSync(output, 'utf8') };
     };
-    let resolved = resolve('pull_request', { pull_request: { title: '[source-only] Sync sources' } });
+    // A bare payload ref is not trusted; the runner GITHUB_REF is.
+    let resolved = resolve('workflow_dispatch', { ref: 'main' }, 'refs/heads/main');
+    assert.equal(resolved.written, 'mode=full\n');
+    assert.match(resolved.result.stdout, /manual dispatch on refs\/heads\/main/);
+    // A payload claiming main cannot override a non-main runner ref.
+    resolved = resolve('workflow_dispatch', { ref: 'refs/heads/main' }, 'refs/heads/feature/example');
     assert.equal(resolved.written, 'mode=source-only\n');
-    assert.match(resolved.result.stdout, /marker in pull request title/);
-    resolved = resolve('push', {
-      head_commit: { message: '[source-only] Sync sources' },
-      pull_request: { title: 'Ordinary integration' },
+    // Missing runner ref fails closed even with a main-looking payload.
+    resolved = resolve('workflow_dispatch', { ref: 'refs/heads/main' }, undefined);
+    assert.equal(resolved.written, 'mode=source-only\n');
+    // Ordinary push/PR are always source-only, regardless of strings.
+    resolved = resolve('push', { ref: 'refs/heads/main', head_commit: { message: '[source-only]' } }, 'refs/heads/main');
+    assert.equal(resolved.written, 'mode=source-only\n');
+    resolved = resolve('pull_request', { pull_request: { title: "[source-only]\n$(touch pwned)" } }, 'refs/heads/main');
+    assert.equal(resolved.written, 'mode=source-only\n');
+    // Malformed payload fails closed before writing a mode.
+    fs.writeFileSync(event, '{not json');
+    const malformed = runCli(['resolve-mode'], {
+      NEXUS_EVENT_NAME: 'workflow_dispatch', NEXUS_EVENT_PATH: event, GITHUB_REF: 'refs/heads/main',
     });
-    assert.equal(resolved.written, 'mode=source-only\n');
-    assert.match(resolved.result.stdout, /marker in push head commit message/);
-    resolved = resolve('push', { head_commit: { message: 'Ordinary integration' } });
-    assert.equal(resolved.written, 'mode=full\n');
-    assert.match(resolved.result.stdout, /default full checks/);
-    resolved = resolve('pull_request', { pull_request: { title: "[source-only]\n$(touch pwned)" } });
-    assert.equal(resolved.written, 'mode=source-only\n');
-    resolved = resolve('pull_request', { pull_request: { title: "'; touch pwned; '" } });
-    assert.equal(resolved.written, 'mode=full\n');
-    resolved = resolve('workflow_dispatch', { head_commit: { message: '[source-only] ignored' } });
-    assert.equal(resolved.written, 'mode=full\n');
+    assert.notEqual(malformed.status, 0);
   } finally {
     fs.rmSync(fixture.directory, { recursive: true, force: true });
   }
@@ -284,7 +273,7 @@ test('workflow wiring resolves the mode once and keeps full and candidate behavi
   assert.ok(steps.indexOf(validate) > steps.indexOf(mode));
   assert.ok(steps.indexOf(validate) < steps.indexOf(toolchain));
   const checks = steps.find(step => step.name === 'Check source without compiling a distribution candidate');
-  assert.equal(checks.if, "github.ref != 'refs/heads/main' || contains(github.event.head_commit.message, '[source-only]')");
+  assert.equal(checks.if, "steps.source_mode.outputs.mode == 'source-only'");
   assert.equal(checks.run, 'npm run i18n:check && npm run typecheck && npm run test');
   const report = steps.find(step => step.run === 'node scripts/ci/source-check-plan.mjs report');
   assert.ok(steps.indexOf(report) < steps.indexOf(toolchain));
@@ -297,7 +286,7 @@ test('workflow wiring resolves the mode once and keeps full and candidate behavi
     assert.equal(step.if, "steps.source_mode.outputs.mode == 'source-only'");
     assert.deepEqual(step.env, { NEXUS_SOURCE_CHECK_MODE: '${{ steps.source_mode.outputs.mode }}' });
   }
-  const candidateGuard = "github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[source-only]')";
+  const candidateGuard = "steps.source_mode.outputs.mode == 'full'";
   for (const step of steps.filter(item => item.run?.includes('npm run build') ||
     item.run?.includes('electron-builder') || item.run?.includes('artifact-manifest.mjs') ||
     item.uses?.startsWith('actions/upload-artifact')))

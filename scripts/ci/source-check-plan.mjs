@@ -7,7 +7,6 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export const SOURCE_ONLY_MARKER = '[source-only]';
 export const FULL_MODE = 'full';
 export const SOURCE_ONLY_MODE = 'source-only';
 export const MODES = [FULL_MODE, SOURCE_ONLY_MODE];
@@ -31,18 +30,15 @@ const SPAWNS_PROCESS = /from ['"]node:child_process['"]|require\(\s*['"]node:chi
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-export function hasSourceOnlyMarker(text) {
-  return typeof text === 'string' && text.includes(SOURCE_ONLY_MARKER);
-}
-
-export function sourceOnlyMarkerLocation(eventName, event) {
-  if (eventName === 'push') return hasSourceOnlyMarker(event?.head_commit?.message) ? 'push head commit message' : null;
-  if (eventName === 'pull_request') return hasSourceOnlyMarker(event?.pull_request?.title) ? 'pull request title' : null;
-  return null;
-}
-
-export function resolveMode(eventName, event) {
-  return sourceOnlyMarkerLocation(eventName, event) ? SOURCE_ONLY_MODE : FULL_MODE;
+// The full native/distribution path is reachable only through an explicit
+// manual dispatch on the main branch. The ref comes from the runner-provided
+// GITHUB_REF, which GitHub documents as the canonical non-overridable ref; the
+// event payload's ref is not trusted for mode selection. Ordinary pushes and
+// pull requests always use the noncompiling source-only plan; commit messages
+// and pull request titles never select a build mode. Unknown or non-main
+// manual events fail closed to source-only.
+export function resolveMode(eventName, runnerRef) {
+  return eventName === 'workflow_dispatch' && runnerRef === 'refs/heads/main' ? FULL_MODE : SOURCE_ONLY_MODE;
 }
 
 export function readEventPayload(file) {
@@ -154,13 +150,18 @@ function modeFromEnv() {
 function resolveModeCommand() {
   const eventName = process.env.NEXUS_EVENT_NAME ?? process.env.GITHUB_EVENT_NAME ?? '';
   const eventPath = process.env.NEXUS_EVENT_PATH ?? process.env.GITHUB_EVENT_PATH ?? '';
-  const event = readEventPayload(eventPath);
-  const mode = resolveMode(eventName, event);
+  // Validate the event payload so a malformed context still fails closed. Its
+  // ref is not used: the runner-provided GITHUB_REF is the trusted ref.
+  readEventPayload(eventPath);
+  const runnerRef = process.env.GITHUB_REF ?? '';
+  const mode = resolveMode(eventName, runnerRef);
   const output = process.env.GITHUB_OUTPUT;
   if (output) writeGithubOutput(output, mode);
   else console.log(modeOutputLine(mode).trim());
-  const location = sourceOnlyMarkerLocation(eventName, event);
-  console.log(`Source check mode: ${mode}${location ? ` (marker in ${location})` : ' (default full checks)'}`);
+  const reason = mode === FULL_MODE
+    ? `explicit manual dispatch on ${runnerRef}`
+    : 'ordinary push/pull request or non-main manual event (fail closed)';
+  console.log(`Source check mode: ${mode} (${reason})`);
 }
 
 function validateModeCommand() {
