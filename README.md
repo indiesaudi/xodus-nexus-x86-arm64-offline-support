@@ -26,9 +26,7 @@ Browse the Store, install games you own or can access through a subscription,
 and play with a managed runtime family. Xbox sign-in and cloud saves are available
 for supported games.
 
-![Nexus Launcher demo](docs/screenshots/demo.gif?v=dc773ded)
-
-*Preview with sample account data.*
+![Nexus Launcher demo](docs/screenshots/demo.gif?v=3db50803)
 
 ## Community translations
 
@@ -43,7 +41,7 @@ language? Request it in a [GitHub issue](https://github.com/domsvoboda/nexus-lau
 
 ## Install
 
-Download the latest Linux AppImage from [Releases](https://github.com/domsvoboda/nexus-launcher/releases), make it executable and open it. Release assets are named `Nexus-Launcher-<version>-<arch>.AppImage` with a matching `.sha512sum` sidecar. Existing `Xodus-Nexus-...` release assets remain available for existing installations. Launcher versions before 0.5 only recognize the older asset names for in-app updates; use the installer or download the latest AppImage once, then later versions update in place. Stable releases currently ship for x86_64. Experimental ARM64 support requires matching native launcher, backend and runtime builds, compatible graphics drivers and FEX for x86 Windows games.
+Download the latest Linux AppImage from [Releases](https://github.com/domsvoboda/nexus-launcher/releases), make it executable and open it. Stable releases currently ship for x86_64. Experimental ARM64 support requires matching native launcher, backend and runtime builds, compatible graphics drivers and FEX for x86 Windows games.
 
 The current x86_64 runtime requires glibc 2.38 or newer (for example Ubuntu 24.04 or a current SteamOS, Fedora or Arch installation). Ubuntu 22.04 does not meet this requirement.
 
@@ -52,13 +50,6 @@ For an application-menu installation on supported distributions:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh | bash
 ```
-
-The installer asks whether to install a fresh copy or upgrade an existing
-installation. For noninteractive use, pass `--install` or `--upgrade` after
-`bash -s --`, for example
-`curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh | bash -s -- --upgrade`.
-By default, it installs the latest stable release and keeps existing games,
-saves, settings, accounts and runtimes.
 
 On first startup, the launcher installs and verifies the **Nexus backend** in
 the background so you can sign in during setup. Install the **Nexus Runtime**
@@ -78,28 +69,21 @@ Close Nexus Launcher and its games, then remove the application-menu installatio
 curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/uninstall.sh | bash
 ```
 
-Games, saves, settings, downloaded runtimes, wallet credentials and system packages are kept. Installations made with older `Xodus-Nexus-...` asset names are removed by the same script.
-For a custom installation, use the same `XODUS_NEXUS_PREFIX` and `XDG_DATA_HOME` as during installation.
+Games, saves, settings, downloaded runtimes, wallet credentials and system packages are kept.
 To preview the files, download the script and run `bash uninstall.sh --dry-run`.
 If you only downloaded an AppImage manually, delete that AppImage instead.
 
 ## Use
 
 - **My Library** combines owned, Game Pass and installed games, with Access, Play state and title filters.
-- In **My Library → In Game Pass**, choose **Recently added to Game Pass** to show games in Microsoft's recent PC collection first.
 - Open a game for its description, categories, screenshot gallery and available Xbox achievements, time played and last activity. Xbox data depends on the account and game.
 - **Store** lets you browse and install supported PC games.
-- New game installations show the estimated download size and free space on the destination drive. The downloader checks exact space requirements.
 - **Manage content** installs licensed add-ons and campaign packages.
 - **Install Queue** downloads games one at a time and lets you add more while downloading or playing another game. Pause and resume are supported, including manual resume after restarting the launcher.
-- Cancelling a new installation can keep or delete its partial files. Existing games, updates and DLC keep their files.
 - Right-click an installed game for settings, VC++ prerequisites, shortcuts or removal.
-- Removing a game can keep its files or permanently delete its installation folder without using Trash. Saves inside that folder are deleted too; saves elsewhere are not affected.
-- Game settings offer separate **DualSense** and **DualShock 4 compatibility modes** for controller detection. They apply only to the selected game. The DualSense fallback may disable advanced haptics and adaptive triggers.
 - Game settings also choose the runtime family for that game. The choice follows the latest installed verified build of the family and keeps the same prefix and saves.
 - Choose **Add to Steam** in the game menu, or **Add Nexus Launcher to Steam** in Settings, to create a Non-Steam shortcut with available artwork. Steam can stay running, including in Game Mode. Requires native Linux Steam; Flatpak Steam is not yet supported.
 - Update the launcher, backend and each installed runtime family in **Settings**.
-- **Settings → Close to system tray** keeps the launcher and downloads running after closing its window. Use the tray menu to reopen Nexus Launcher or quit. Requires a desktop system tray.
 - **Settings → Interface language** selects a bundled translation independently of game language and Store region. Missing translations fall back to English.
 - **Settings → Downloads** sets a combined game download speed limit in MiB/s (0 means unlimited). A supporting Nexus backend is required; saving the limit also applies it to active downloads.
 - **Settings → Shader cache** sets the per-game Mesa/NVIDIA driver cache limit, 4 GiB by default. Changes apply on the next game launch; explicit environment overrides take precedence.
@@ -188,69 +172,6 @@ but have not been verified and may encounter compatibility issues.
 | Minecraft Dungeons II | Yes | Playable online. |
 | Minecraft for Windows | Yes | Playable online. For licensing code 501, check the [Store device limit](#microsoft-store-device-limit). |
 | Minecraft Launcher | Yes | Sign-in and Java download/startup work with launcher 0.3.5; Java online unverified. [Login failure](https://github.com/domsvoboda/nexus-launcher/issues/107) also reported on another setup. |
-| No Man's Sky | Yes | Playable online. |
-| Valor Mortis | Yes | Fully playable. |
-| Forza Horizon 6 | Yes | Playable online; some setups need [VC++ prerequisites](https://github.com/domsvoboda/nexus-launcher/issues/96). [Loading failures](https://github.com/domsvoboda/nexus-launcher/issues/13) also reported. |
-| Palworld | Yes | Playable online. |
-| DOOM Eternal | Yes | Playable. |
-| Microsoft Flight Simulator 2024 | Partial | Unreleased runtime: sign-in and main menu verified. Multiplayer unverified. |
-| Microsoft Flight Simulator (2020) | Startup verified | Unreleased runtime: reaches Installation Manager. Content download and flights unverified. |
-| SnowRunner | Yes | Unreleased runtime: works. Multiplayer and DLC unverified. |
-| Ori and the Will of the Wisps | Partial | Unreleased Experimental runtime: sign-in and main menu work; gameplay unverified. |
-| Like a Dragon: Infinite Wealth | Partial | Unreleased Experimental runtime: main menu works; gameplay unverified. |
-| DOOM: The Dark Ages | Yes | Playable (user report). |
-| Fallout 76 | Yes | Playable online; [one reported setup](https://github.com/domsvoboda/nexus-launcher/issues/9#issuecomment-6227548598) requires gamescope to display correctly. |
-| The Outer Worlds 2 | Yes | Playable. |
-| Wolfenstein: The Old Blood | Yes | Playable. |
-| Wasteland Remastered | Yes | Playable. |
-| Danganronpa 2 | Yes | Playable. |
-| Neon Abyss 2 | Yes | Playable. |
-| Hollow Knight: Voidheart Edition | Yes | Playable. |
-| Avowed | Yes | Playable. |
-| Mortal Shell: Enhanced Edition | Yes | Playable (user report). |
-| Sea of Thieves | Yes | Playable online. |
-| Tony Hawk's Pro Skater 3 + 4 | Partial | Solo playable; Private Match loads a map. Joining other players and public matchmaking remain unconfirmed. ([#88](https://github.com/domsvoboda/nexus-launcher/issues/88)) |
-| ARC Raiders | No | Launches but cannot connect to online services. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/100)) |
-| Hogwarts Legacy | Yes | Playable. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/110)) |
-| Halo Infinite | Partial | Unreleased Experimental runtime: main menu and campaign start; multiplayer unavailable (offline). |
-| Halo: Campaign Evolved | Yes | Playable; may remain running after quitting. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/97)) |
-| Resonance: A Plague Tale Legacy | Yes | Desktop gameplay and Xbox cloud saves work. Steam Deck exit black screen also reported. ([desktop report](https://github.com/domsvoboda/nexus-launcher/issues/446), [Steam Deck report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Resident Evil 2 | Yes | Playable; may remain running after quitting. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/110)) |
-| Wreckfest | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| TUNIC | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Hades | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Hell Let Loose: Vietnam | No | Crashes after Easy Anti-Cheat initialization on Arch Linux with an Arc A770. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Human: Fall Flat | Partial | Public online game search fails. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Wolfenstein II: The New Colossus | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| The Dungeon of Naheulbeuk: The Amulet of Chaos | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Soul Hackers 2 | Yes | Playable with launcher 0.3.8 (user report, [#166](https://github.com/domsvoboda/nexus-launcher/issues/166#issuecomment-6285236638)). |
-| Monster Boy and the Cursed Kingdom | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Hollow Knight: Silksong | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| Teenage Mutant Ninja Turtles: Shredder's Revenge | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| DRAGON QUEST XI S: Echoes of an Elusive Age - Definitive Edition | No | Crashes after the first loading screen. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| ACA NEOGEO METAL SLUG | No | Crashes at launch. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| SIGNALIS | Yes | Playable. ([user report](https://docs.google.com/spreadsheets/d/1HD8fr8XotC2o0seA5TRaiZ3TeltdyUv5aWhxSPeD-6s/edit?usp=sharing)) |
-| DREDGE | Yes | Playable. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/106)) |
-| Warhammer 40,000: Space Marine 2 | Yes | Playable; online unverified. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/106)) |
-| Indiana Jones and the Great Circle | Yes | First mission playable. ([#78](https://github.com/domsvoboda/nexus-launcher/issues/78)) |
-| Microsoft Jewel | No | Crashes at launch. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| Microsoft Bubble | No | Crashes at launch. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| AI: THE SOMNIUM FILES - nirvanA Initiative | Yes | Playable; Store ID detection issue reported. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| Minecraft Legends | Yes | Playable; an online session starts, but play with friends is unverified. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| The Elder Scrolls: Arena | No | Crashes at launch. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| The Elder Scrolls II: Daggerfall | No | Crashes at launch. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| Wolfenstein: Enemy Territory | Partial | Playable, but cannot join PunkBuster-enabled servers. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/107)) |
-| Hell Let Loose | No | Crashes at startup. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/105)) |
-| Kingdom Come: Deliverance II | Yes | Playable. ([#112](https://github.com/domsvoboda/nexus-launcher/issues/112)) |
-| PAC-MAN MUSEUM+ | No | Stops after the opening logos. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/61)) |
-| Farming Simulator 25 | No | Startup failure reported; updated runtime retest pending. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/62)) |
-| PowerWash Simulator 2 | Yes | Playable. ([#69](https://github.com/domsvoboda/nexus-launcher/issues/69)) |
-| Young Souls | Unverified | Launches in Steam Deck Desktop Mode; gameplay unverified. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/8#issuecomment-6225913594)) |
-| Remnant II | Unverified | Starts and exits cleanly; gameplay and online were not detailed. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/34#issuecomment-6190973665)) |
-| The Witcher 3 | No | Currently crashes on launch. |
-| LIMBO | Yes | Playable. |
-| World War Z | Partial | Connects to online services and starts Quick Match search; joining a match is unverified. |
-| Balatro | Yes | Playable. |
 
 [Full compatibility list](https://github.com/domsvoboda/nexus-launcher/wiki/Compatibility)
 
@@ -260,8 +181,8 @@ not confirm gameplay or online support.
 
 ## Screenshots
 
-[Library](docs/screenshots/demo-library.png) ·
-[Store](docs/screenshots/demo-store.png) ·
+[Library](docs/screenshots/demo-library.gif) ·
+[Store](docs/screenshots/demo-store.gif) ·
 [Social](docs/screenshots/demo-social.png) ·
 [Chat](docs/screenshots/demo-chat.png) ·
 [Install queue](docs/screenshots/demo-downloads.png) ·
