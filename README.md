@@ -161,10 +161,10 @@ but have not been verified and may encounter compatibility issues.
 | John Carpenter's Toxic Commando | Yes | Unreleased Standard runtime: connects to other players online. |
 | Forza Motorsport | Partial | Unreleased runtime: intro completed. Online play unverified. |
 | Forza Horizon 5 | Yes | Unreleased Standard runtime: playable; startup can be slow. Online play unverified. |
-| Age of Empires II: Definitive Edition | Yes | Unreleased runtime: single-player works; CachyOS startup verified. Dynasties of India: Bengalis selectable. Online play unverified. |
-| Age of Empires III: Definitive Edition | Yes | Unreleased runtime: works. Online play unverified. |
-| Age of Empires: Definitive Edition | Partial | Unreleased runtime: menu and sign-in work; Multiplayer and LAN menus enabled. Gameplay unverified. |
-| Age of Empires IV | Startup verified | Unreleased runtime: starts successfully; online play unverified. |
+| Age of Empires II: Definitive Edition | Yes | Playable. Online play unverified. |
+| Age of Empires III: Definitive Edition | Yes | Playable. Online play unverified. |
+| Age of Empires: Definitive Edition | Yes | Playable. Online play unverified. |
+| Age of Empires IV | Yes | Playable. Online play unverified. |
 | Batman: Arkham Knight | Yes | Works with Standard and CachyOS runtimes. |
 | Gears of War: E-Day | Yes | Playable online; Xbox playing status works. |
 | Deep Rock Galactic | Yes | Playable online. |
