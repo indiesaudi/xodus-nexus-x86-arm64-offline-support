@@ -8,6 +8,7 @@ Your Microsoft Store PC games, on Linux.
 
 [![CI](https://github.com/domsvoboda/nexus-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/domsvoboda/nexus-launcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/uu8ZfxFhm4)
 
 **[🌐 Help translate Nexus Launcher on Tolgee](https://app.tolgee.io/projects/36162)**
 
