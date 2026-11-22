@@ -19,25 +19,29 @@ npm run test:runtime-tools
 npm run test:ci-tools
 ```
 
-Keep one shared runtime. Use disposable test directories, never a user's active
-game installation, saves or Xodus checkout. Keep credentials, raw diagnostics,
-prefixes and private work records outside Git. Include redacted reproduction steps,
+The launcher, backend and runtime are separate components built in their own
+repositories: [nexus-launcher](https://github.com/domsvoboda/nexus-launcher),
+[nexus-backend](https://github.com/domsvoboda/nexus-backend) and
+[nexus-runtime](https://github.com/domsvoboda/nexus-runtime). Change runtime
+libraries and patches in the runtime repository, not here.
+
+Use disposable test directories, never a user's active game installation,
+runtime, saves or Xodus checkout. Keep credentials, raw diagnostics, prefixes
+and private work records outside Git. Include redacted reproduction steps,
 versions and actual test results in bug reports and PRs.
 
-Develop and pull requests run source checks without distribution builds. Only
-main builds launcher/backend/runtime candidates, once per relevant source change.
-Promotion reuses those exact files without rebuilding.
-Use `[source-only]` in the main integration commit subject when only source
-publication is intended. Source checks still run, but launcher packaging and
-backend compilation are skipped. A normal main integration or explicit workflow
-dispatch retains the usual candidate build behavior.
+Ordinary pushes and pull requests run source checks without distribution builds,
+including on `main`. Launcher candidates require an explicit manual CI dispatch
+on `main`; backend and runtime candidates are built in their own repositories.
+Commit messages do not select the build mode. Promotion reuses the exact tested
+files without rebuilding.
 Stable publication requires explicit maintainer approval
 for the exact tested artifact, with no rebuild after validation. The approval
 record is [release-validation.json](.github/release-validation.json).
 
 Detailed guides are prepared for the [wiki](https://github.com/domsvoboda/nexus-launcher/wiki)
-(currently pending). Runtime reconstruction instructions and source/license
-locks remain alongside the [build scripts](scripts/SHARED_RUNTIME.md).
+(currently pending). Runtime build, source and license documentation lives in
+the [runtime repository](https://github.com/domsvoboda/nexus-runtime).
 
 For interface translations and Tolgee import/export, see
 [Translating the launcher](docs/TRANSLATING.md).

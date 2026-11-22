@@ -51,13 +51,6 @@ jobs:
         env:
           NEXUS_SOURCE_CHECK_MODE: ${{ steps.source_mode.outputs.mode }}
         run: node scripts/ci/source-check-plan.mjs report
-      - name: Install account-free runtime fixture toolchain
-        if: steps.source_mode.outputs.mode == 'full'
-        timeout-minutes: 15
-        run: |
-          sudo "$(command -v node)" scripts/ci/ubuntu-mirror.mjs
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y gcc-mingw-w64-x86-64
       - name: Check source without compiling a distribution candidate
         if: steps.source_mode.outputs.mode == 'source-only'
         run: npm run i18n:check && npm run typecheck && npm run test

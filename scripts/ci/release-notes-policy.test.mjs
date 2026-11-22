@@ -5,14 +5,13 @@ import { releaseNotesRef, assertApprovedReleaseNotes } from './release-notes-pol
 const commit = 'a'.repeat(40), notes = '# Release\n\nReviewed notes.\n';
 const approval = { notesSha256: createHash('sha256').update(notes).digest('hex') };
 test('digest-approved notes use promotion metadata for every component without rebuilding', () => {
-  for (const kind of ['launcher', 'backend', 'runtime']) {
+  for (const kind of ['launcher', 'backend']) {
     assert.equal(releaseNotesRef(kind, commit, approval), 'HEAD');
     assert.doesNotThrow(() => assertApprovedReleaseNotes(notes, approval));
   }
 });
 test('older approvals retain their original notes source', () => {
   for (const kind of ['launcher', 'backend']) assert.equal(releaseNotesRef(kind, commit, {}), commit);
-  assert.equal(releaseNotesRef('runtime', commit, {}), 'HEAD');
   assert.doesNotThrow(() => assertApprovedReleaseNotes(notes, {}));
 });
 test('edited, empty or malformed approved text fails closed', () => {

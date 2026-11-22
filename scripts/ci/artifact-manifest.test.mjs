@@ -16,14 +16,16 @@ test('launcher candidate is bound to exact bytes and commit', async () => {
     await assert.rejects(verifyManifest(root), /checksum mismatch/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
-test('runtime requires the matching corresponding-source archive', async () => {
+test('the retired legacy runtime candidate recipe is rejected before any file is written', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'candidate-test-'));
   try {
     await fs.writeFile(path.join(root, 'xodus-nexus-runtime-test-x86_64.tar.xz'), 'synthetic runtime');
-    await assert.rejects(writeManifest('runtime', root, context), /complete/);
     await fs.writeFile(path.join(root, 'xodus-nexus-runtime-test-source.tar.xz'), 'synthetic source');
-    await writeManifest('runtime', root, context);
-    assert.equal((await verifyManifest(root, { kind: 'runtime' })).files.length, 4);
+    await assert.rejects(writeManifest('runtime', root, context), /Invalid candidate identity/);
+    await assert.rejects(writeManifest('runtime', root, { ...context, kind: 'runtime' }), /Invalid candidate identity/);
+    await assert.rejects(verifyManifest(root), /ENOENT|Invalid/);
+    assert.deepEqual(await fs.readdir(root).then(names => names.sort()),
+      ['xodus-nexus-runtime-test-source.tar.xz', 'xodus-nexus-runtime-test-x86_64.tar.xz']);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 test('symlink artifacts are rejected', async () => {
