@@ -46,33 +46,29 @@ test('full mode keeps the exact existing runtime tool command and files', () => 
   assert.deepEqual(plan.runtimeTools.files, files);
   assert.deepEqual(plan.runtimeTools.omitted, []);
   assert.deepEqual(omissionReport(plan), []);
-  assert.ok(files.includes('scripts/runtime-compat/staging.test.mjs'));
+  assert.deepEqual(files, ['scripts/eac-trace-summary.test.mjs', 'scripts/wine-exception-metadata.test.mjs']);
+  assert.deepEqual(NATIVE_COMPILATION_FIXTURES, []);
 });
 
-test('source-only mode keeps every noncompiling runtime tool fixture in order', () => {
+test('source-only mode keeps every runtime tool fixture in order', () => {
   const script = runtimeToolsScript();
   const files = parseRuntimeToolFiles(script);
   const plan = buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: script, exists: () => true });
   assert.equal(plan.mode, SOURCE_ONLY_MODE);
   assert.equal(plan.installNativeToolchain, false);
-  assert.deepEqual(plan.runtimeTools.omitted.map(item => item.file),
-    ['scripts/runtime-compat/staging.test.mjs']);
-  assert.ok(plan.runtimeTools.omitted.every(item => typeof item.reason === 'string' && item.reason.length > 0));
-  assert.deepEqual(plan.runtimeTools.files,
-    files.filter(file => file !== 'scripts/runtime-compat/staging.test.mjs'));
+  assert.deepEqual(plan.runtimeTools.omitted, []);
+  assert.deepEqual(plan.runtimeTools.files, files);
   assert.deepEqual(plan.runtimeTools.command, ['node', '--test', ...plan.runtimeTools.files]);
   assert.ok(plan.runtimeTools.files.includes('scripts/eac-trace-summary.test.mjs'));
-  assert.ok(plan.runtimeTools.files.some(file => file.startsWith('scripts/runtime-tests/')));
-  assert.ok(plan.runtimeTools.files.every(file => !file.includes('runtime-compat/staging')));
+  assert.ok(plan.runtimeTools.files.includes('scripts/wine-exception-metadata.test.mjs'));
 });
 
-test('source-only mode reports the native omission without claiming native coverage', () => {
+test('source-only mode reports no native omission without claiming native coverage', () => {
   const plan = buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: runtimeToolsScript(), exists: () => true });
   const report = omissionReport(plan).join('\n');
-  assert.match(report, /gcc-mingw-w64-x86-64/);
-  assert.match(report, /scripts\/runtime-compat\/staging\.test\.mjs/);
-  assert.match(report, /not a substitute for the full native checks/);
+  assert.match(report, /No native compilation fixtures are declared/);
   assert.doesNotMatch(report, /passed/i);
+  assert.doesNotMatch(report, /not a substitute for the full native checks/);
 });
 
 test('the declared omission is justified by actual compiler invocations', () => {
@@ -80,9 +76,6 @@ test('the declared omission is justified by actual compiler invocations', () => 
   assert.deepEqual(listCompilingFixtures(files, read), NATIVE_COMPILATION_FIXTURES.map(item => item.file));
   const plan = buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: runtimeToolsScript(), exists: () => true });
   assert.deepEqual(listCompilingFixtures(plan.runtimeTools.files, read), []);
-  assert.match(read('scripts/runtime-compat/staging.test.mjs'), /execFileSync\('x86_64-w64-mingw32-gcc'/);
-  assert.match(read('scripts/runtime-compat/build.mjs'), /run\('gcc'/);
-  assert.match(read('scripts/runtime-compat/build.mjs'), /run\('x86_64-w64-mingw32-gcc'/);
 });
 
 test('source-only fails closed on a future compiling fixture not in the manifest', () => {
@@ -145,13 +138,18 @@ test('the output writer appends only a validated literal mode', () => {
   }
 });
 
-test('source-only fails closed when the exclusion manifest is stale or incomplete', () => {
-  assert.throws(() => buildPlan({
-    mode: SOURCE_ONLY_MODE, runtimeToolsScript: runtimeToolsScript(), exists: () => false,
-  }), /missing from the checkout/);
-  assert.throws(() => buildPlan({
-    mode: SOURCE_ONLY_MODE, runtimeToolsScript: 'node --test scripts/other.test.mjs', exists: () => true,
-  }), /not selected by test:runtime-tools/);
+test('source-only fails closed when a declared fixture is stale or no fixture is selected', () => {
+  const script = runtimeToolsScript();
+  // Declared exclusions stay checked against the selected files and the
+  // checkout, so a future compiling fixture must be reviewed, not dropped.
+  const selected = parseRuntimeToolFiles(script);
+  const declared = [{ file: selected[0], reason: 'temporary' }];
+  assert.throws(() => buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: script, exists: () => false, fixtures: declared }),
+    /missing from the checkout/);
+  assert.throws(() => buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: 'node --test scripts/other.test.mjs', exists: () => true, fixtures: declared }),
+    /not selected by test:runtime-tools/);
+  assert.throws(() => buildPlan({ mode: SOURCE_ONLY_MODE, runtimeToolsScript: 'node --test', exists: () => true }),
+    /selects no test files/);
 });
 
 test('unknown modes fail instead of falling back to a silent plan', () => {
@@ -223,7 +221,7 @@ test('resolve-mode trusts the runner ref, not the event payload ref', () => {
   }
 });
 
-test('report command prints and summarizes the omitted native fixture', () => {
+test('report command prints the current source-only selection', () => {
   const fixture = tempFixture();
   try {
     const summary = fixture.join('summary.md');
@@ -232,9 +230,8 @@ test('report command prints and summarizes the omitted native fixture', () => {
       NEXUS_SOURCE_CHECK_MODE: SOURCE_ONLY_MODE, GITHUB_STEP_SUMMARY: summary,
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /scripts\/runtime-compat\/staging\.test\.mjs/);
-    assert.match(result.stdout, /not a substitute for the full native checks/);
-    assert.match(fs.readFileSync(summary, 'utf8'), /scripts\/runtime-compat\/staging\.test\.mjs/);
+    assert.match(result.stdout, /No native compilation fixtures are declared/);
+    assert.match(fs.readFileSync(summary, 'utf8'), /No native compilation fixtures are declared/);
   } finally {
     fs.rmSync(fixture.directory, { recursive: true, force: true });
   }
@@ -267,16 +264,16 @@ test('workflow wiring resolves the mode once and keeps full and candidate behavi
   assert.equal(validate.run, 'node scripts/ci/source-check-plan.mjs validate-mode');
   assert.deepEqual(validate.env, { NEXUS_SOURCE_CHECK_MODE: '${{ steps.source_mode.outputs.mode }}' });
   assert.equal(validate.if, undefined);
-  const toolchain = steps.find(step => step.run?.includes('ubuntu-mirror.mjs'));
-  assert.equal(toolchain.if, "steps.source_mode.outputs.mode == 'full'");
-  assert.equal(toolchain['timeout-minutes'], 15);
+  // No runtime tool fixture compiles native code, so CI installs no extra
+  // toolchain and the source-only and full plans run the same checks.
+  assert.ok(!steps.some(step => step.run?.includes('ubuntu-mirror.mjs')));
+  assert.ok(!steps.some(step => step.run?.includes('gcc-mingw-w64')));
   assert.ok(steps.indexOf(validate) > steps.indexOf(mode));
-  assert.ok(steps.indexOf(validate) < steps.indexOf(toolchain));
   const checks = steps.find(step => step.name === 'Check source without compiling a distribution candidate');
   assert.equal(checks.if, "steps.source_mode.outputs.mode == 'source-only'");
   assert.equal(checks.run, 'npm run i18n:check && npm run typecheck && npm run test');
   const report = steps.find(step => step.run === 'node scripts/ci/source-check-plan.mjs report');
-  assert.ok(steps.indexOf(report) < steps.indexOf(toolchain));
+  assert.ok(steps.indexOf(report) > steps.indexOf(validate));
   assert.ok(steps.indexOf(report) < steps.indexOf(checks));
   assert.ok(steps.some(step => step.run === 'npm run test:ci-tools'));
   const fullTools = steps.find(step => step.run === 'npm run test:runtime-tools');

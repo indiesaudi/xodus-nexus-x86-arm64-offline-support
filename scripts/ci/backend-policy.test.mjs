@@ -40,9 +40,10 @@ test('delegated builds reject a different source or build recipe before executin
 test('backend candidates and promotion belong to the backend repository',async()=>{
   await assert.rejects(fs.access('.github/workflows/backend.yml'));
   const release=await fs.readFile('.github/workflows/release.yml','utf8');
-  assert.match(release,/options: \[launcher, runtime\]/);
+  // The launcher repository promotes only its own AppImage candidate.
+  assert.match(release,/options: \[launcher\]/);
   const promotion=await fs.readFile('scripts/ci/promote-candidate.mjs','utf8');
-  assert.match(promotion,/!\['launcher', 'runtime'\].includes\(kind\)/);
+  assert.match(promotion,/kind !== 'launcher'/);
 });
 test('launcher retains incomplete-update launch barriers and capability gates',async()=>{
   const state=await fs.readFile('src/main/installation-state.ts','utf8');
