@@ -18,14 +18,13 @@ test('manual launcher candidates can select x64 without weakening main-only chec
   assert.ok(workflow.jobs.checks.steps.some(step=>step.run==='npm run build'&&step.if===candidateGuard));
   assert.ok(workflow.jobs.checks.steps.some(step=>step.run==='node scripts/ci/artifact-manifest.mjs write launcher release'&&step.if===candidateGuard));
 });
-test('full backend/runtime workflows only build main, including manual dispatch',async()=>{
-  for(const [name,job] of [['runtime','changes']]){
-    const workflow=await read(name);
-    if(name==='backend')assert.deepEqual(workflow.on.push.branches,['main']);
-    else assert.deepEqual(Object.keys(workflow.on),['workflow_dispatch']);
-    assert.equal(workflow.on.pull_request,undefined);
-    assert.equal(workflow.jobs[job].if,name==='backend'?candidateGuard:"github.ref == 'refs/heads/main'");
-  }
+test('the launcher repository has no separate runtime workflow to dispatch',async()=>{
+  // Runtime builds live in the independent runtime repository; only launcher
+  // candidates are promoted from this repository.
+  await assert.rejects(fs.readFile('.github/workflows/runtime.yml','utf8'),{code:'ENOENT'});
+  const release=await read('release');
+  assert.deepEqual(Object.keys(release.on),['workflow_dispatch']);
+  assert.equal(release.jobs.promote.if,"github.ref == 'refs/heads/main' && inputs.approve_release");
 });
 test('develop/PR checks cannot package or upload launcher candidates',async()=>{
   const steps=(await read('ci')).jobs.checks.steps;
@@ -52,12 +51,10 @@ test('ordinary main/develop/PR events run source checks but never compile or pac
     assert.equal(resolveMode('workflow_dispatch',ref),SOURCE_ONLY_MODE);
   assert.deepEqual(Object.keys((await read('release')).on),['workflow_dispatch']);
 });
-test('runtime CI exposes the installed Ubuntu Wine tools before compilation',async()=>{
-  const steps=(await read('runtime')).jobs.build.steps;
-  const install=steps.findIndex(step=>step.name==='Install build and test prerequisites');
-  const build=steps.findIndex(step=>step.name==='Build all shared components from pinned clean checkouts');
-  assert.ok(install>=0&&build>install);
-  assert.match(steps[install].run,/wine64-tools/);
-  assert.match(steps[install].run,/test -x \/usr\/lib\/wine\/widl/);
-  assert.match(steps[install].run,/echo \/usr\/lib\/wine >> "\$GITHUB_PATH"/);
+test('launcher CI compiles no native runtime fixtures',async()=>{
+  const steps=(await read('ci')).jobs.checks.steps;
+  const runs=steps.map(step=>step.run??'').join('\n');
+  assert.doesNotMatch(runs,/wine64-tools|mingw|runtime-compat|runtime-tests/);
+  assert.ok(steps.some(step=>step.run==='npm run test:runtime-tools'&&step.if===candidateGuard));
+  assert.ok(steps.some(step=>step.name==='Run noncompiling runtime tool tests'&&step.if===sourceGuard));
 });

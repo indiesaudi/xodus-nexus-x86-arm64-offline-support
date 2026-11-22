@@ -1,6 +1,7 @@
 // Resolve the launcher source-check mode and select runtime tool fixtures.
 // The full mode keeps the existing commands. The explicit source-only mode
 // omits only fixtures that invoke a native compiler, and reports the omission.
+// No runtime tool fixture compiles native code today, so the manifest is empty.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -14,13 +15,9 @@ export const MODES = [FULL_MODE, SOURCE_ONLY_MODE];
 // Keep this list explicit. Every entry must remain selected by the
 // test:runtime-tools script and must exist in the checkout. If either check
 // fails, source-only mode fails closed instead of silently compiling or
-// silently dropping a different fixture.
-export const NATIVE_COMPILATION_FIXTURES = [
-  {
-    file: 'scripts/runtime-compat/staging.test.mjs',
-    reason: 'builds the MinGW probe DLL, the Linux wine launcher shim and the Windows compatibility executable',
-  },
-];
+// silently dropping a different fixture. An empty list keeps behavior
+// unchanged, but still fails closed on a new compiling fixture below.
+export const NATIVE_COMPILATION_FIXTURES = [];
 
 // Source-only catches future fixtures that both spawn a process and mention a
 // native compiler. A new such file must be reviewed and added to the manifest
@@ -75,7 +72,7 @@ export function parseRuntimeToolFiles(script) {
   return files;
 }
 
-export function buildPlan({ mode, runtimeToolsScript, exists = fs.existsSync } = {}) {
+export function buildPlan({ mode, runtimeToolsScript, exists = fs.existsSync, fixtures = NATIVE_COMPILATION_FIXTURES } = {}) {
   if (!MODES.includes(mode)) throw new Error(`Unknown source check mode: ${String(mode)}`);
   const files = parseRuntimeToolFiles(runtimeToolsScript);
   if (mode === FULL_MODE) {
@@ -85,7 +82,7 @@ export function buildPlan({ mode, runtimeToolsScript, exists = fs.existsSync } =
       runtimeTools: { command: ['npm', 'run', 'test:runtime-tools'], files, omitted: [] },
     };
   }
-  const omitted = NATIVE_COMPILATION_FIXTURES.map(item => ({ ...item }));
+  const omitted = fixtures.map(item => ({ ...item }));
   for (const item of omitted) {
     if (!files.includes(item.file))
       throw new Error(`Native compilation fixture is not selected by test:runtime-tools: ${item.file}`);
@@ -111,9 +108,12 @@ export function listCompilingFixtures(files, readFile) {
 
 export function omissionReport(plan) {
   if (plan.mode !== SOURCE_ONLY_MODE) return [];
-  const lines = [
-    '[source-only] Native toolchain installation (gcc-mingw-w64-x86-64) is skipped.',
-  ];
+  const lines = [];
+  if (plan.runtimeTools.omitted.length === 0) {
+    lines.push('[source-only] No native compilation fixtures are declared; every runtime tool test file runs.');
+    return lines;
+  }
+  lines.push('[source-only] Native toolchain installation (gcc-mingw-w64-x86-64) is skipped.');
   for (const item of plan.runtimeTools.omitted)
     lines.push(`[source-only] Omitted native compilation fixture: ${item.file} (${item.reason}).`);
   lines.push(`[source-only] ${plan.runtimeTools.files.length} of ${plan.runtimeTools.files.length + plan.runtimeTools.omitted.length} runtime tool test files still run.`);
