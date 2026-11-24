@@ -42,8 +42,8 @@ hours. The launcher's in-app updater checks this repository, so it offers you th
 ## How the builds are made
 
 [`arm64-release.yml`](.github/workflows/arm64-release.yml) checks upstream for new releases. For each one,
-it checks out upstream's tagged commit, runs upstream's own checks and tests, and packages the AppImage on
-an arm64 GitHub runner. Each release links the exact upstream commit it was built from.
+it checks out upstream's tagged commit, runs upstream's own checks and tests, and packages the arm64
+AppImage the same way upstream's CI does. Each release links the exact upstream commit it was built from.
 
 The source is upstream's, with one change:
 [`point-updater-at-fork.mjs`](.github/arm64/point-updater-at-fork.mjs) points the in-app updater at this

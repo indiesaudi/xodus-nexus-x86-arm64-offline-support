@@ -58,7 +58,9 @@ jobs:
   build:
     needs: plan
     if: needs.plan.outputs.tag != ''
-    runs-on: ubuntu-24.04-arm
+    # Upstream's tests assume an x86_64 host, and upstream's CI packages its arm64
+    # AppImage from x86_64 too. Do the same: test on x86_64, package for arm64.
+    runs-on: ubuntu-24.04
     env:
       TAG: ${{ needs.plan.outputs.tag }}
     steps:
