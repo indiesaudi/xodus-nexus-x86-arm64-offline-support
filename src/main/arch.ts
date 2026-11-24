@@ -3,7 +3,7 @@ export type NexusArch = 'x64' | 'arm64';
 export const NEXUS_ARCHES: readonly NexusArch[] = ['x64', 'arm64'];
 /** Backend archives: `xodus-nexus-backend-<version>-linux-<suffix>.tar.xz` (uname -m names). */
 export const BACKEND_ARCH_SUFFIX: Record<NexusArch, string> = { x64: 'x86_64', arm64: 'aarch64' };
-/** AppImages: `Xodus-Nexus-<version>-<suffix>.AppImage` (electron-builder's `${arch}`). */
+/** AppImages: `Nexus-Launcher-<version>-<suffix>.AppImage` (electron-builder's `${arch}`). */
 export const APPIMAGE_ARCH_SUFFIX: Record<NexusArch, string> = { x64: 'x86_64', arm64: 'arm64' };
 /** ELF `e_machine` values the installers verify before executing anything. */
 export const ELF_MACHINE: Record<NexusArch, number> = { x64: 62, arm64: 183 };
@@ -15,7 +15,7 @@ export function nexusArch(arch: string = process.arch): NexusArch | undefined {
 /** The architecture this launcher process runs as; its downloads must match it. */
 export function currentArch(arch: string = process.arch): NexusArch {
   const supported = nexusArch(arch);
-  if (!supported) throw new Error(`Xodus Nexus does not support ${arch} hosts.`);
+  if (!supported) throw new Error(`Nexus Launcher does not support ${arch} hosts.`);
   return supported;
 }
 

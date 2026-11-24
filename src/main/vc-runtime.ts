@@ -1,12 +1,29 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
+import { steamGameEnvironment } from './steam-launch-context.js';
+import { gameLoggingEnvironment } from './game-log.js';
 
 // Immutable Microsoft download. The hash is also embedded in the CDN path.
 // Do not package or redistribute the Microsoft installer with the AppImage.
 export const VC_REDIST_VERSION = '14.44.35211.0';
 export const VC_REDIST_SHA256 = 'cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b';
 export const VC_REDIST_URL = `https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/${VC_REDIST_SHA256.toUpperCase()}/VC_redist.x64.exe`;
+
+/**
+ * Environment for the VC++ operation, which has no incoming game launch
+ * context. One sanitized copy of the primary process environment feeds both
+ * prefix initialization and the installer, so a Steam-started Nexus does not
+ * hand Steam's cache variables to either. The process environment is not
+ * modified. The installer keeps its usual logging defaults.
+ */
+export function vcOperationEnvironment(primary: NodeJS.ProcessEnv = process.env): {
+  environment: NodeJS.ProcessEnv;
+  installerEnvironment: NodeJS.ProcessEnv;
+} {
+  const environment = steamGameEnvironment(primary);
+  return { environment, installerEnvironment: gameLoggingEnvironment(environment) };
+}
 
 export function versionAtLeast(actual: string, minimum: string): boolean {
   const left = actual.split('.').map(Number);

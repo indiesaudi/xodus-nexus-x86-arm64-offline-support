@@ -1,3 +1,4 @@
+import type {RuntimeFamily,GameRuntimeSelection,InstalledRuntimeFamily,RuntimeBuildApproval,RuntimePrefixAnchors,RuntimePrefixIdentity} from './runtime-selection.js';
 export type Page = 'home' | 'store' | 'library' | 'downloads' | 'settings' | 'social';
 
 export interface BackendCapabilities {
@@ -22,6 +23,10 @@ export interface BackendCapabilities {
   offlinePc?: boolean;
   /** `run --offline`: skip Microsoft entirely and launch on the stored offline license. */
   offlineLaunch?: boolean;
+  /** `login --player` / `logout --player`: a second, separate Xbox player account. */
+  playerAccount?: boolean;
+  licenseProfile?: boolean;
+  savedAccounts?: boolean;
   streamingControls?: boolean;
   streamingBandwidthLimit?: boolean;
   streamingUpdateRecovery?: boolean;
@@ -35,8 +40,13 @@ export interface AuthStatus {
   running: boolean;
   stored: boolean | null;
   username?: string;
+  /** Separate Xbox player account, when the backend stores one next to the license account. */
+  player?: string;
   gamertag?: string;
   avatarDataUrl?: string;
+  licenseAvatarDataUrl?: string;
+  saved?: string[];
+  savedAccountsEnabled?: boolean;
   subscription?: GamePassSubscription;
   lastResult?: 'success' | 'failed';
   lastAction?: 'login' | 'logout';
@@ -60,9 +70,9 @@ export interface BackendStatus {
   updating: boolean;
   externalRoot: string;
   capabilities: BackendCapabilities;
-  prerequisites: { git: boolean; cargo: boolean; rustc: boolean; protoc: boolean };
   blockReason?: string;
   linuxRunPatch?: string;
+  recipeSha256?: string;
   version?: string;
   delivery?: 'release' | 'local';
   releaseAvailable?: boolean;
@@ -70,7 +80,20 @@ export interface BackendStatus {
   phase?: string;
 }
 
+export interface ManagedRuntimeOptions {allowCachyos:boolean;allowPrerelease:boolean;}
+export interface ManagedFamilyStatus {
+  id:RuntimeFamily;installed?:InstalledRuntimeFamily;version?:string;channel?:'stable'|'prerelease';
+  available?:{version:string;candidateSha256:string;sourceCommit:string;archiveName:string;requiresBackendVersion:string;requiresLauncherVersion:string};
+  checking:boolean;installing:boolean;updateAvailable?:boolean;phase?:string;error?:string;
+}
+export interface ManagedFamilyInstallResult {
+  family:RuntimeFamily;success:boolean;committed:boolean;buildId?:string;
+  durability:'confirmed'|'unknown'|'not-committed';error?:string;
+}
 export interface RuntimeStatus {
+  managedFamilies?:ManagedFamilyStatus[];
+  managedRevision?:number;
+  variants?: InstalledRuntimeFamily[];
   installed: boolean;
   checking: boolean;
   updating: boolean;
@@ -83,7 +106,7 @@ export interface RuntimeStatus {
   artifactExpiresAt?: string;
   artifactAvailable: boolean;
   // Prebuilt runtime with the Nexus xgameruntime patches, published on the
-  // Xodus Nexus GitHub releases. Preferred over the official snapshot.
+  // Nexus Launcher GitHub releases. Preferred over the official snapshot.
   nexusAvailable?: boolean;
   nexusName?: string;
   nexusVersion?: string;
@@ -96,6 +119,7 @@ export interface RuntimeStatus {
 
 export interface GameLaunchTools {
   dualSenseCompatibility?: boolean;
+  dualShock4Compatibility?: boolean;
   mangoHud: boolean;
   gamescope: boolean;
   gamescopeArgs: string;
@@ -111,8 +135,17 @@ export interface Game {
   publisher?: string;
   installedVersion?: string;
   packageName?: string;
+  licenseAccount?: string; // Store account the game was installed with.
   executable?: string;
-  winePath?: string; // Legacy saved field; ignored for launch. The runtime is global.
+  winePath?: string; // Legacy saved field; ignored for launch.
+  runtime?: GameRuntimeSelection;
+  runtimeSeparatePrefix?: boolean;
+  runtimeBuild?: RuntimeBuildApproval; // Old prefix origin only, never a launch pin.
+  runtimePrefixes?: RuntimePrefixAnchors; // Legacy per-family path metadata, never a launch pin.
+  /** Backend-owned durable prefix location. Captured from the persisted state
+   * before a selection change; it survives family switches and reloads and is
+   * never accepted from the renderer. */
+  runtimePrefixIdentity?: RuntimePrefixIdentity;
   launchArgs?: string;
   launchTools?: GameLaunchTools;
   locale?: string;
@@ -129,6 +162,9 @@ export interface Game {
     encryptedTarget: boolean;
   };
   addedAt: string;
+  /** Completion of a genuine new installation. Older profiles and imports have
+   * no value, so presentation must not treat `addedAt` as proof of installation. */
+  installedAt?: string;
 }
 
 export interface GameLaunchOptions {
@@ -139,6 +175,7 @@ export interface GameLaunchOptions {
 }
 
 export interface DownloadTask {
+  source?: 'store';
   id: string;
   kind?: 'install' | 'update' | 'content';
   gameId?: string;
@@ -180,9 +217,12 @@ export interface GameOperation {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  cloudSaveWarning?: string;
 }
 
 export interface Settings {
+  closeToTray?: boolean;
+  multiAccountEnabled?: boolean;
   interfaceLanguage?: string;
   installRoot: string;
   market: string;
@@ -198,6 +238,27 @@ export interface Settings {
   overlaySide?:'left'|'right';
   firstRunCompleted?: boolean;
 }
+
+export type ComponentUpdateOutcome = 'updated' | 'unchanged' | 'skipped' | 'stale' | 'committed-needs-attention' | 'failed-before-commit' | 'not-run' | 'deferred';
+export interface ComponentUpdatePlanItem {
+  id: string;
+  component: 'backend' | 'runtime' | 'launcher';
+  label: string;
+  currentVersion?: string;
+  targetVersion?: string;
+  state: 'ready' | 'unchanged' | 'skipped' | 'deferred';
+  reason?: string;
+}
+export interface ComponentUpdatePlan { id: string; createdAt: string; items: ComponentUpdatePlanItem[] }
+export interface ComponentUpdateItemResult {
+  id: string;
+  outcome: ComponentUpdateOutcome;
+  message?: string;
+  committed: boolean;
+  retryable: boolean;
+}
+export interface ComponentUpdateBatchResult { planId: string; items: ComponentUpdateItemResult[]; restartRequired: boolean }
+export interface ComponentUpdatesStatus { running: boolean; phase?: string; plan?: ComponentUpdatePlan; result?: ComponentUpdateBatchResult }
 
 export interface LauncherUpdate {
   currentVersion: string;
@@ -234,7 +295,11 @@ export interface KeyringStatus {
   message: string;
 }
 
-export interface LauncherApi {setXboxOverlayRecording(recording:boolean):Promise<void>;}
+export interface SteamKeyboardRequest { x: number; y: number; width: number; height: number; mode: 0 | 1 | 2 | 3 }
+
+export interface LauncherApi {
+  onLauncherPage(callback:(page: "home"|"library"|"store"|"settings")=>void):()=>void;
+  showTouchKeyboard(field?: SteamKeyboardRequest): Promise<boolean>;setXboxOverlayRecording(recording:boolean):Promise<void>;}
 /** The Xbox app's "Offline permissions" setting for this device, as Microsoft reports it. */
 export interface OfflinePermissions {
   /** Local launcher check, not a licensing grant or a Microsoft response field. */
@@ -269,12 +334,14 @@ export interface AppSnapshot {
   settings: Settings;
   auth: AuthStatus;
   launcherUpdate?: LauncherUpdate;
+  componentUpdates?: ComponentUpdatesStatus;
   gameOperation?: GameOperation;
   gameUpdates?: Record<string, GameUpdate>;
   downloadProgressSupported?: boolean;
 }
 
 export interface InstallRequest {
+  source?: 'store';
   productId: string;
   title: string;
   destination: string;
@@ -340,8 +407,15 @@ export interface CatalogProduct {
   supportNote: string;
 }
 
-/** A saved installation ID, or an explicit read-only Store catalog identity. */
-export type GameDetailsTarget = string | {productId:string};
+/** Public Store browsing is the only non-account catalog presentation scope.
+ * It selects read-only metadata from the neutral public Store market only; it
+ * never proves ownership or grants install access, and account activity,
+ * achievements and licensing keep their configured market. */
+export type GameDetailsScope = 'public-store';
+/** A saved installation ID, or an explicit read-only Store catalog identity.
+ * An unscoped identity keeps the configured/effective account market; only an
+ * explicit `public-store` scope selects public browsing metadata. */
+export type GameDetailsTarget = string | {productId:string; scope?:GameDetailsScope};
 
 /** Public catalog data only, never an ownership/installation decision. */
 export interface GameStoreDetails {
@@ -392,7 +466,38 @@ export interface CatalogSearchResult {
   source: 'Microsoft Store';
 }
 
+/** Public presence in the official PC Game Pass recent collection.
+ * This is not an owned Library page and grants no account access. */
+export interface RecentGamePassShelf {
+  market: string;
+  products: CatalogProduct[];
+  fetchedAt: string;
+  source: 'Microsoft Game Pass catalog';
+  stale?: boolean;
+}
+
 export type LibraryAccess = 'owned' | 'gamepass' | 'other';
+/** An exact game child reachable through a validated forward membership path
+ * from one currently OWNED bundle offer. This only makes the game eligible for
+ * Xodus's own license check before any download; it is never ownership and
+ * never appears in `accessByProductId`. Game Pass access to a root is not
+ * ownership of that bundle and never establishes this eligibility. */
+export interface StoreBundleMember {
+  bundleProductId: string;
+  access: 'owned';
+}
+export interface StoreAccess {
+  configuredMarket: string;
+  account: string;
+  backend: string;
+  market: string;
+  checkedAt: string;
+  expiresAt: string;
+  accessByProductId: Record<string, LibraryAccess>;
+  /** Requested Store products whose bundle membership was verified by the
+   * main process; the renderer cannot add entries. */
+  bundleMembershipByProductId?: Record<string, StoreBundleMember>;
+}
 export interface AccountLibraryPage {
   kind: 'all' | LibraryAccess;
   sort?: 'recent-gamepass';
@@ -527,6 +632,7 @@ export interface XboxMessageReceipt {id:string}
 export interface XboxGameInviteAvailability {canInvite:boolean;gameId?:string;title?:string;reason?:string}
 export interface XboxChatReadState {account:string;binary:string;keys:string[]}
 export interface LauncherApi {
+  showTouchKeyboard(field?: SteamKeyboardRequest): Promise<boolean>;
  closeXboxChat():Promise<void>;
  getXboxChatReads():Promise<XboxChatReadState|undefined>;
  onXboxChatReads(callback:(state:XboxChatReadState)=>void):()=>void;
@@ -548,9 +654,13 @@ export interface LauncherApi {
   refreshBackend(): Promise<BackendStatus>;
   checkBackendUpdate(): Promise<BackendStatus>;
   updateBackend(): Promise<void>;
-  rebuildBackend(): Promise<void>;
+  importBackend(directory:string): Promise<BackendStatus>;
   refreshRuntime(): Promise<RuntimeStatus>;
+  getRuntimeFamilies(): Promise<InstalledRuntimeFamily[]>;
   checkRuntimeUpdate(): Promise<RuntimeStatus>;
+  checkManagedRuntime(family:RuntimeFamily,options:ManagedRuntimeOptions):Promise<ManagedFamilyStatus>;
+  installManagedRuntime(family:RuntimeFamily,expectedCandidateSha256:string,options:ManagedRuntimeOptions):Promise<ManagedFamilyInstallResult>;
+  importManagedRuntime(family:RuntimeFamily,directory:string,options:ManagedRuntimeOptions):Promise<ManagedFamilyInstallResult>;
   checkNexusRuntime(): Promise<RuntimeStatus>;
   installRuntime(): Promise<void>;
   installNexusRuntime(): Promise<void>;
@@ -560,23 +670,35 @@ export interface LauncherApi {
   startKeyring(): Promise<KeyringStatus>;
   createKeyringCollection(): Promise<KeyringStatus>;
   onKeyringStatus(callback: (status: KeyringStatus) => void): () => void;
+  planComponentUpdates(): Promise<ComponentUpdatePlan>;
+  applyComponentUpdates(planId: string): Promise<ComponentUpdateBatchResult>;
+  getComponentUpdatesStatus(): Promise<ComponentUpdatesStatus>;
+  retryComponentUpdate(planId: string, itemId: string): Promise<ComponentUpdateBatchResult>;
   checkLauncherUpdate(): Promise<LauncherUpdate | undefined>;
   installLauncherUpdate(): Promise<void>;
   restartLauncher(): Promise<void>;
   rollbackLauncherUpdate(): Promise<void>;
   checkGameUpdates(id?: string): Promise<void>;
+  stopGameUpdateCheck(): Promise<void>;
   readDiagnosticLog(operationId: string): Promise<DiagnosticLog>;
   copyDiagnosticLog(operationId: string): Promise<void>;
   revealDiagnosticLog(operationId: string): Promise<void>;
   readBackendDiagnosticLog(): Promise<DiagnosticLog>;
   createDiagnosticReport(gameId?: string): Promise<DiagnosticReport>;
   saveDiagnosticReport(content: string): Promise<boolean>;
-  login(): Promise<void>;
-  logout(): Promise<void>;
+  login(player?: boolean): Promise<void>;
+  logout(player?: boolean): Promise<void>;
+  useAccount(name: string): Promise<void>;
+  forgetAccount(name: string): Promise<void>;
   offlinePermissions(): Promise<OfflinePermissions>;
   setOfflinePermissions(enabled: boolean): Promise<OfflinePermissions>;
   searchCatalog(query: string, cursor?: string): Promise<CatalogSearchResult>;
   getFeaturedCatalog(): Promise<CatalogSearchResult>;
+  browseCatalog(cursor?: string): Promise<CatalogSearchResult>;
+  getRecentGamePassShelf(): Promise<RecentGamePassShelf>;
+  /** Account access; the optional bounded product IDs additionally return
+   * main-process verified bundle membership for those products only. */
+  getStoreAccess(requested?: string[]): Promise<StoreAccess>;
   getAccountLibrary(kind: AccountLibraryPage['kind'], cursor?: string, refresh?: boolean, sort?: AccountLibraryPage['sort']): Promise<AccountLibraryPage>;
   startInstall(request: InstallRequest): Promise<string>;
   getInstallPlan(productId: string, destination?: string): Promise<InstallPlan>;
@@ -590,9 +712,10 @@ export interface LauncherApi {
   removeDownload(id: string): Promise<void>;
   clearFinishedDownloads(): Promise<void>;
   importGame(path?: string): Promise<Game | null>;
-  updateGame(id: string, patch: Partial<Pick<Game, 'title' | 'executable' | 'launchArgs' | 'locale' | 'launchTools'>>): Promise<Game>;
+  updateGame(id: string, patch: Partial<Pick<Game, 'title' | 'executable' | 'launchArgs' | 'locale' | 'launchTools' | 'runtime' | 'runtimeSeparatePrefix'>>): Promise<Game>;
   getGameLocales(id: string): Promise<string[]>;
   removeGame(id: string, mode: 'library' | 'delete-files'): Promise<void>;
+  getGameRuntimeReadiness(id: string): Promise<boolean>;
   getGameLaunchOptions(id: string): Promise<GameLaunchOptions>;
   getGameDetails(id: GameDetailsTarget): Promise<GameStoreDetails | undefined>;
   getGameActivity(id: GameDetailsTarget, refresh?: boolean): Promise<GameActivity>;

@@ -16,7 +16,7 @@ export function gameLaunchArguments(
   offline = false,
 ): string[] {
   if (backendPatch !== LINUX_RUN_PATCH) {
-    throw new Error('Play requires the current managed Xodus backend. Update the backend in Settings.');
+    throw new Error('Play requires the current managed Nexus backend. Update the backend in Settings.');
   }
   if (!game.executable?.trim()) throw new Error('The package manifest has no launch executable.');
   const args = ['run', game.path, wine, '--exe', game.executable, '--materialize-chain'];
@@ -27,4 +27,21 @@ export function gameLaunchArguments(
   // online steps instead of waiting for each connect timeout in turn.
   if (offline) args.push('--offline');
   return args;
+}
+
+/**
+ * Proton reads WINEDLLOVERRIDES and WINE_LARGE_ADDRESS_AWARE from the process
+ * environment, so a shell leftover must not replace the runtime's own values.
+ * Only a Proton session takes over these two settings: a standalone Wine keeps the
+ * inherited environment it has always received, and a game's launch options still
+ * set both above the Proton session command.
+ */
+export function launchEnvironmentForRuntime(
+  environment: NodeJS.ProcessEnv,
+  protonSession: boolean,
+): NodeJS.ProcessEnv {
+  if (!protonSession) return environment;
+  delete environment.WINEDLLOVERRIDES;
+  delete environment.WINE_LARGE_ADDRESS_AWARE;
+  return environment;
 }

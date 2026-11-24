@@ -1,5 +1,6 @@
 import type { CatalogProduct, CatalogSearchResult, GameStoreDetails } from '../shared/types.js';
 import {catalogXboxTitleId} from './game-details-target.js';
+import {bundleHints, bundleRoot} from './store-bundle-access.js';
 
 type Fetcher = typeof fetch;
 
@@ -36,6 +37,7 @@ interface StoreSearchResponse {
   productsList?: unknown;
   cursor?: unknown;
   hasMorePages?: unknown;
+  nextPageNumber?: unknown;
 }
 
 interface DisplayCatalogResponse {
@@ -57,6 +59,65 @@ interface BundleReference {
 const IMAGE_HOSTS = new Set(['store-images.s-microsoft.com', 'store-images.microsoft.com']);
 const STORE_HOSTS = new Set(['www.xbox.com', 'xbox.com', 'apps.microsoft.com']);
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const SEARCH_CACHE_LIMIT = 100;
+const SEARCH_REQUEST_LIMIT = 32;
+// Social title history identifies games by Xbox title ID, not by Store product
+// ID. The documented Display Catalog alternate-ID lookup is the only stable
+// mapping we use; it is anonymous public metadata and never carries account
+// tokens, headers or per-player state into the cached image URL.
+const TITLE_ARTWORK_TTL_MS = 10 * 60 * 1000;
+const TITLE_ARTWORK_NEGATIVE_TTL_MS = 2 * 60 * 1000;
+const TITLE_ARTWORK_CACHE_LIMIT = 500;
+const TITLE_ARTWORK_LOOKUPS_PER_CALL = 24;
+const TITLE_ARTWORK_CONCURRENCY = 4;
+const TITLE_ARTWORK_REQUESTS_LIMIT = 8;
+// A slow catalog must not hold the whole game history open. Workers stop
+// starting lookups after this deadline and keep the existing placeholders.
+const TITLE_ARTWORK_DEADLINE_MS = 8_000;
+const TITLE_ARTWORK_REQUEST_TIMEOUT_MS = 6_000;
+const TITLE_ARTWORK_EXPIRED = Symbol('title-artwork-expired');
+
+/** Race one awaited lookup against the current caller's budget. The shared
+ * request keeps running for other callers and for the cache; only this caller
+ * stops waiting. The listener is removed as soon as either side settles. */
+function raceCallerDeadline<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof TITLE_ARTWORK_EXPIRED> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { resolve(TITLE_ARTWORK_EXPIRED); return; }
+    const expired = () => resolve(TITLE_ARTWORK_EXPIRED);
+    signal.addEventListener('abort', expired, {once: true});
+    promise.then(
+      value => { signal.removeEventListener('abort', expired); resolve(value); },
+      error => { signal.removeEventListener('abort', expired); reject(error); },
+    );
+  });
+}
+// The Store's games recommendation feeds return about ten products per page.
+// Trending games are dominated by free-to-play titles that the public browsing
+// policy has to hide, so the top paid collection supplies real breadth. Both
+// feeds are bounded here: one page is cached for ten minutes per market.
+const FEATURED_PAGE_ITEMS = 12;
+const FEATURED_TRENDING_PAGES = 1;
+const FEATURED_PAID_PAGES = 3;
+// Filtering add-on resale offers can leave the landing rail with one or two
+// cards even though the official paid chart has more standalone games. Refill
+// from the next official page, in rank order, up to a hard page bound so a
+// single landing load cannot fan out indefinitely.
+const FEATURED_MIN_ITEMS = 3;
+const FEATURED_MAX_PAID_PAGES = 5;
+// The landing page shows a bounded featured set. Its own result carries the
+// cursor for the next unread Top paid page, so the renderer continues the exact
+// feed that was actually read instead of assuming which pages exist.
+const BROWSE_COLLECTION = 'TopPaid';
+const BROWSE_FIRST_PAGE = 1;
+const BROWSE_LAST_PAGE = 40;
+
+function browsePage(value: unknown): number {
+  if (value === undefined) return BROWSE_FIRST_PAGE;
+  const digits = string(value)?.match(/^paid-([0-9]{1,2})$/)?.[1];
+  const page = digits === undefined ? NaN : Number(digits);
+  if (!Number.isInteger(page) || page < 1 || page > BROWSE_LAST_PAGE) throw new Error('The Store browse cursor is invalid.');
+  return page;
+}
 // Box art is square and carries the game's title branding, matching the
 // square library tiles; promotional square art is the textless fallback.
 const POSTER_PURPOSES = ['BoxArt', 'TitledPoster', 'Poster', 'FeaturePromotionalSquareArt'];
@@ -157,6 +218,7 @@ function directPackageSupport(product: Record<string, unknown> | undefined): Pac
   for (const availability of skus) {
     const sku = object(object(availability)?.Sku);
     const properties = object(sku?.Properties);
+    if(properties?.IsTrial===true||properties?.IsDemo===true||properties?.IsPreOrder===true||['trial','demo'].includes(string(sku?.SkuType)?.toLowerCase()??''))continue;
     const packages = Array.isArray(properties?.Packages) ? properties.Packages : [];
     for (const entry of packages) {
       const pkg = object(entry);
@@ -182,7 +244,9 @@ function bundleReferences(product: Record<string, unknown> | undefined): BundleR
   const references = new Map<string, boolean>();
   const skus = Array.isArray(product?.DisplaySkuAvailabilities) ? product.DisplaySkuAvailabilities : [];
   for (const availability of skus) {
-    const properties = object(object(object(availability)?.Sku)?.Properties);
+    const sku=object(object(availability)?.Sku);
+    const properties = object(sku?.Properties);
+    if(properties?.IsTrial===true||properties?.IsDemo===true||properties?.IsPreOrder===true||['trial','demo'].includes(string(sku?.SkuType)?.toLowerCase()??''))continue;
     const bundled = Array.isArray(properties?.BundledSkus) ? properties.BundledSkus : [];
     for (const entry of bundled) {
       const record = object(entry);
@@ -191,6 +255,68 @@ function bundleReferences(product: Record<string, unknown> | undefined): BundleR
     }
   }
   return [...references].map(([productId, primary]) => ({ productId, primary }));
+}
+
+/** Featured cards must represent a standalone game offer. Public ProductType
+ * alone cannot prove that: an offer typed Game can bundle a base game with a
+ * currency card, add-on or content pack. A root with no bundled references is
+ * the product itself; a root with references is a standalone game only when
+ * every referenced child is also a Game. Genuine multi-game packs and edition
+ * wrappers therefore remain eligible, while base-game-plus-extra offers and
+ * add-on resale bundles do not. */
+export function standaloneFeaturedOffer(productId: string, details: Map<string, Record<string, unknown>>): boolean {
+  const product = details.get(productId);
+  const type = string(product?.ProductType);
+  if (!product || (type !== 'Game' && type !== 'Bundle')) return false;
+  const references = bundleReferences(product);
+  if (references.length === 0) return type === 'Game';
+  for (const reference of references) {
+    if (string(details.get(reference.productId)?.ProductType) !== 'Game') return false;
+  }
+  return true;
+}
+
+/** Editions and resale variants of one base game share an official product
+ * group. Featured keeps the first, highest-ranked representative of the group. */
+function featuredIdentity(productId: string, details: Map<string, Record<string, unknown>>): string {
+  return string(object(details.get(productId)?.Properties)?.ProductGroupId)?.toLowerCase() ?? productId;
+}
+
+function catalogProductIds(collection: StoreSearchResponse): string[] {
+  return (Array.isArray(collection.productsList) ? collection.productsList as StoreSearchProduct[] : [])
+    .flatMap((product) => string(object(product)?.productId)?.toUpperCase() ?? [])
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+/** Merge Store collections in priority order, keeping one row per product ID. */
+function mergeCollections(...collections: StoreSearchResponse[]): StoreSearchResponse {
+  const seen = new Set<string>();
+  const productsList: StoreSearchProduct[] = [];
+  for (const collection of collections) {
+    for (const product of Array.isArray(collection.productsList) ? collection.productsList as StoreSearchProduct[] : []) {
+      const productId = string(product?.productId)?.toUpperCase();
+      if (!productId || seen.has(productId)) continue;
+      seen.add(productId);
+      productsList.push(product);
+    }
+  }
+  return { productsList };
+}
+
+/** Build the search-shaped row that both the licensed and public catalog
+ * paths feed into the shared parser. It only reuses display metadata that the
+ * detail response already returned; absence is never replaced by a guess. */
+function localizedRow(product: Record<string, unknown>): StoreSearchProduct | undefined {
+  const productId = string(product.ProductId)?.toUpperCase();
+  if (!productId) return;
+  const localized = Array.isArray(product.LocalizedProperties) ? object(product.LocalizedProperties[0]) : undefined;
+  const images = Array.isArray(localized?.Images) ? localized.Images as DisplayCatalogImage[] : [];
+  const find = (purposes: string[]) => {
+    const uri = string(purposes.flatMap(purpose => images.filter(image => image.ImagePurpose === purpose))[0]?.Uri);
+    return uri?.startsWith('//') ? `https:${uri}` : uri;
+  };
+  return { productId, title: string(localized?.ProductTitle) ?? productId, description: localized?.ProductDescription,
+    publisherName: localized?.PublisherName, boxArtUrl: find(POSTER_PURPOSES), isGame: true };
 }
 
 function packageSupport(productId: string, details: Map<string, Record<string, unknown>>, visited = new Set<string>(), budget = { remaining: 512 }): PackageSupport {
@@ -242,7 +368,43 @@ function packageSupport(productId: string, details: Map<string, Record<string, u
   };
 }
 
-export function parseCatalogProducts(search: StoreSearchResponse, catalog: DisplayCatalogResponse): CatalogProduct[] {
+/** Public browsing excludes positively identified free/demo/trial offers.
+ * Missing prices remain unknown, and subscription branding is never a price. */
+export function excludedStoreOffer(search: Record<string, unknown>, detail?: Record<string, unknown>): boolean {
+  const props=object(detail?.Properties);
+  if (search.isDemo===true || search.isTrial===true || props?.IsDemo===true || props?.IsTrial===true) return true;
+  const rows=Array.isArray(detail?.DisplaySkuAvailabilities)?detail.DisplaySkuAvailabilities:[];
+  let retail=false, paid=false, free=false, unknownRetail=false, trial=false;
+  for(const entry of rows){
+    const availability=object(entry),sku=object(availability?.Sku),properties=object(sku?.Properties);
+    if(!sku)continue;
+    const kind=string(sku.SkuType)?.toLowerCase();
+    if(properties?.IsTrial===true||properties?.IsDemo===true||kind==='trial'||kind==='demo'){trial=true;continue;}
+    if(properties?.IsPreOrder===true) continue;
+    retail=true;
+    const offers=Array.isArray(availability?.Availabilities)?availability.Availabilities:[];
+    let skuFree=offers.length>0;
+    for(const offer of offers){
+      const price=object(object(object(offer)?.OrderManagementData)?.Price);
+      // MSRP distinguishes a paid title temporarily discounted to zero.
+      const values=[price?.MSRP,price?.ListPrice,price?.BasePrice].filter((v):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0);
+      if(values.some(v=>v>0))paid=true;
+      const malformed=[price?.MSRP,price?.ListPrice,price?.BasePrice].some(v=>v!==undefined&&(typeof v!=='number'||!Number.isFinite(v)||v<0));
+      if(!values.length||malformed||values.some(v=>v>0))skuFree=false;
+    }
+    if(skuFree)free=true;else unknownRetail=true;
+  }
+  if(paid||unknownRetail)return false;
+  if(trial&&!retail)return true;
+  const price=object(search.priceInfo);
+  // Only structured booleans/numbers, never localized display strings/title.
+  const values=[price?.msrp,price?.listPrice,price?.price].filter((v):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0);
+  if(values.some(v=>v>0))return false;
+  const malformed=[price?.msrp,price?.listPrice,price?.price].some(v=>v!==undefined&&(typeof v!=='number'||!Number.isFinite(v)||v<0));
+  return free || price?.isFree===true || (!malformed&&values.length>0&&values.every(v=>v===0));
+}
+
+export function parseCatalogProducts(search: StoreSearchResponse, catalog: DisplayCatalogResponse, policy: 'library' | 'store' | 'featured' = 'library'): CatalogProduct[] {
   const detailMap = new Map<string, Record<string, unknown>>();
   const details = Array.isArray(catalog.Products) ? catalog.Products : [];
   for (const detail of details) {
@@ -251,10 +413,25 @@ export function parseCatalogProducts(search: StoreSearchResponse, catalog: Displ
     if (id && record) detailMap.set(id, record);
   }
   const products = Array.isArray(search.productsList) ? search.productsList as StoreSearchProduct[] : [];
+  const featured = new Set<string>();
   return products.flatMap((product) => {
+    if(!object(product))return [];
     const productId = string(product.productId)?.toUpperCase();
     const title = string(product.title);
     if (!productId || !title || product.isGame === false) return [];
+    const detail=detailMap.get(productId);
+    // Game includes base games and game bundles. Endpoint mediaType/isGame
+    // alone also admits extras; children cannot change the offer's own type.
+    if(policy==='store' && (detail?.ProductType!=='Game' || excludedStoreOffer(product as Record<string,unknown>,detail)))return [];
+    // The featured shelf additionally requires standalone-game composition and
+    // one card per official product group so an add-on resale or lower edition
+    // cannot duplicate the base game ranked above it.
+    if(policy==='featured'){
+      if(!standaloneFeaturedOffer(productId,detailMap)||excludedStoreOffer(product as Record<string,unknown>,detail))return [];
+      const identity=featuredIdentity(productId,detailMap);
+      if(featured.has(identity))return [];
+      featured.add(identity);
+    }
     const support = packageSupport(productId, detailMap);
     return [{
       productId,
@@ -278,8 +455,35 @@ export class CatalogService {
   private readonly gameCache = new Map<string, { until: number; value: GameStoreDetails }>();
   private readonly gameRequests = new Map<string,Promise<GameStoreDetails|undefined>>();
   private readonly cache = new Map<string, { expires: number; value: CatalogSearchResult }>();
+  private readonly requests = new Map<string, Promise<CatalogSearchResult>>();
+  private readonly titleArtworkCache = new Map<string,{until:number;value?:string}>();
+  private readonly titleArtworkRequests = new Map<string,Promise<string|undefined>>();
 
   constructor(private readonly fetcher: Fetcher = fetch) {}
+
+  private async cachedResult(key: string, load: () => Promise<CatalogSearchResult>): Promise<CatalogSearchResult> {
+    const now = Date.now();
+    for (const [entryKey, entry] of this.cache) if (entry.expires <= now) this.cache.delete(entryKey);
+    const cached = this.cache.get(key);
+    if (cached) {
+      this.cache.delete(key);
+      this.cache.set(key, cached);
+      return structuredClone(cached.value);
+    }
+    const pending = this.requests.get(key);
+    if (pending) return structuredClone(await pending);
+    if (this.requests.size >= SEARCH_REQUEST_LIMIT) throw new Error('Too many Store requests. Try again.');
+    const request = Promise.resolve().then(load);
+    this.requests.set(key, request);
+    try {
+      const value = await request;
+      while (this.cache.size >= SEARCH_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!);
+      this.cache.set(key, { expires: Date.now() + CACHE_TTL_MS, value });
+      return structuredClone(value);
+    } finally {
+      this.requests.delete(key);
+    }
+  }
 
   /** Read descriptive data independently of installation, ownership or package support. */
   async gameDetails(productId: string, rawMarket: string): Promise<GameStoreDetails | undefined> {
@@ -326,18 +530,95 @@ export class CatalogService {
       const product = object(entry);
       const id = string(product?.ProductId);
       if (!product || !id || !wanted.has(id) || product.ProductType !== 'Game') return [];
-      const localized = Array.isArray(product.LocalizedProperties) ? object(product.LocalizedProperties[0]) : undefined;
-      const images = Array.isArray(localized?.Images) ? localized.Images as DisplayCatalogImage[] : [];
-      const find = (purposes: string[]) => {
-        const uri = string(purposes.flatMap(purpose => images.filter(image => image.ImagePurpose === purpose))[0]?.Uri);
-        return uri?.startsWith('//') ? `https:${uri}` : uri;
-      };
-      return [{ productId: id, title: string(localized?.ProductTitle) ?? id, description: localized?.ProductDescription,
-        publisherName: localized?.PublisherName, boxArtUrl: find(POSTER_PURPOSES), isGame: true }];
+      const row = localizedRow(product);
+      return row ? [row] : [];
     });
     // Ownership and installation support are independent. Preserve the game's
     // real package status for the library badge and Ready to install filter.
     return parseCatalogProducts({ productsList: rows }, catalog);
+  }
+
+  /** Read public descriptive metadata for an official collection in the given
+   * order. Public browsing eligibility hides demos, trials and positively free
+   * offers; the result never implies ownership or permission to install. */
+  async publicProducts(ids: string[], rawMarket: string): Promise<CatalogProduct[]> {
+    if (!ids.length || ids.length > 60 || ids.some(id => !/^[A-Z0-9]{12}$/.test(id))) throw Error('Invalid public product list.');
+    const unique = [...new Set(ids)];
+    const catalog = await this.details(unique, normalizeMarket(rawMarket));
+    // `details` tolerates one failed enrichment batch for search cards. A shelf
+    // with no display metadata at all is an honest load failure, not an empty
+    // collection or a reason to present guessed games.
+    if (!Array.isArray(catalog.Products) || catalog.Products.length === 0)
+      throw Error('The public Store metadata could not be loaded. Check your connection and retry.');
+    const details = new Map<string, Record<string, unknown>>();
+    for (const entry of Array.isArray(catalog.Products) ? catalog.Products : []) {
+      const product = object(entry), productId = string(product?.ProductId)?.toUpperCase();
+      if (product && productId) details.set(productId, product);
+    }
+    const rows = unique.flatMap(id => {
+      const product = details.get(id);
+      const row = product ? localizedRow(product) : undefined;
+      // A display row without its real localized title is not a usable card.
+      return row && row.title !== id ? [row] : [];
+    });
+    return parseCatalogProducts({ productsList: rows }, catalog, 'store');
+  }
+
+  /**
+   * Raw public metadata for one bounded, explicitly requested scope. The
+   * requested products are fetched first; their public `Bundle` reverse
+   * relations only seed which currently owned products are relevant sources.
+   * Only those owned candidates are expanded forward (bounded, cycle-safe) so
+   * unrelated library rights are never traversed. Membership is decided by
+   * `bundleMembership`; nothing here is a license.
+   */
+  async bundleScope(ids: string[], ownedIds: string[], rawMarket: string): Promise<Record<string, unknown>[]> {
+    if (ids.length > 32 || ownedIds.length > 10_000 || [...ids, ...ownedIds].some(id => !/^[A-Z0-9]{12}$/.test(id)))
+      throw Error('Invalid Store bundle scope.');
+    const market = normalizeMarket(rawMarket);
+    const details = new Map<string, Record<string, unknown>>(), fetched = new Set<string>();
+    const owned = new Set(ownedIds);
+    const load = async (batch: string[]) => {
+      const pending = batch.filter(id => !fetched.has(id));
+      if (!pending.length) return;
+      let products: Record<string, unknown>[];
+      try { products = await this.fetchDetails(pending, market); }
+      catch { throw Error('Microsoft Store bundle details could not be loaded. Check your connection and retry.'); }
+      for (const product of products) details.set(string(product.ProductId)!.toUpperCase(), product);
+      for (const id of pending) fetched.add(id);
+    };
+    const wanted = [...new Set(ids)];
+    for (let offset = 0; offset < wanted.length; offset += 25) await load(wanted.slice(offset, offset + 25));
+    // Public reverse relations are discovery hints only, filtered by current ownership.
+    const hinted = [...new Set(wanted.flatMap(id => bundleHints(details.get(id))))]
+      .filter(id => owned.has(id) && !details.has(id));
+    for (let offset = 0; offset < hinted.length; offset += 25) await load(hinted.slice(offset, offset + 25));
+    // Hinted owned candidates come first; an owned product with no public
+    // metadata is simply not a candidate, never a guessed one.
+    const roots = [...new Set([...hinted, ...ownedIds])]
+      .filter(id => details.has(id) && bundleRoot(details.get(id))).slice(0, 32);
+    const seen = roots.map(root => new Set([root]));
+    let frontiers = roots.map(root => [root]);
+    for (let depth = 0; depth <= 6 && frontiers.some(frontier => frontier.length); depth++) {
+      const pending = [...new Set(frontiers.flat())].filter(id => !fetched.has(id));
+      for (let offset = 0; offset < pending.length; offset += 25) await load(pending.slice(offset, offset + 25));
+      frontiers = frontiers.map((frontier, root) => {
+        const next: string[] = [];
+        if (depth === 6) return next;
+        for (const id of frontier) {
+          const product = details.get(id);
+          if (!product || directPackageSupport(product)) continue;
+          for (const child of bundleReferences(product)) {
+            if (seen[root].size >= 48) break;
+            if (!seen[root].has(child.productId)) { seen[root].add(child.productId); next.push(child.productId); }
+          }
+        }
+        return next;
+      });
+    }
+    // Intermediate nodes stay available to the path validator; unrelated
+    // fetched nodes are never returned.
+    return [...details.values()];
   }
 
   private async fetchDetails(batch: string[], market: string): Promise<Record<string, unknown>[]> {
@@ -397,9 +678,8 @@ export class CatalogService {
     return { Products: [...details.values()] };
   }
 
-  private async details(ids: string[], market: string): Promise<DisplayCatalogResponse> {
-    const details = new Map<string, Record<string, unknown>>();
-    let pending = ids.filter((value, index, values) => values.indexOf(value) === index);
+  private async detailMap(ids: string[], market: string, details = new Map<string, Record<string, unknown>>()): Promise<Map<string, Record<string, unknown>>> {
+    let pending = ids.filter((value, index, values) => values.indexOf(value) === index && !details.has(value));
     for (let depth = 0; depth < 4 && pending.length > 0 && details.size < 100; depth += 1) {
       const next = new Set<string>();
       for (let offset = 0; offset < pending.length; offset += 25) {
@@ -419,18 +699,19 @@ export class CatalogService {
       }
       pending = [...next];
     }
-    return { Products: [...details.values()] };
+    return details;
   }
 
-  private async result(search: StoreSearchResponse, query: string, market: string, includePaging: boolean): Promise<CatalogSearchResult> {
-    const ids = (Array.isArray(search.productsList) ? search.productsList as StoreSearchProduct[] : [])
-      .flatMap((product) => string(product.productId)?.toUpperCase() ?? [])
-      .filter((value, index, values) => values.indexOf(value) === index);
-    const catalog = await this.details(ids, market);
+  private async details(ids: string[], market: string): Promise<DisplayCatalogResponse> {
+    return { Products: [...(await this.detailMap(ids, market)).values()] };
+  }
+
+  private async result(search: StoreSearchResponse, query: string, market: string, includePaging: boolean, policy: 'store' | 'featured' = 'store', catalog?: DisplayCatalogResponse): Promise<CatalogSearchResult> {
+    const details = catalog ?? await this.details(catalogProductIds(search), market);
     return {
       query,
       market,
-      products: parseCatalogProducts(search, catalog),
+      products: parseCatalogProducts(search, details, policy),
       cursor: includePaging ? string(search.cursor) : undefined,
       hasMore: includePaging && search.hasMorePages === true && Boolean(string(search.cursor)),
       fetchedAt: new Date().toISOString(),
@@ -445,9 +726,10 @@ export class CatalogService {
     if (cursor && (cursor.length > 4096 || !/^[A-Za-z0-9+/=_-]+$/.test(cursor))) throw new Error('The Store paging cursor is invalid.');
     const market = normalizeMarket(rawMarket);
     const cacheKey = `${market}\u0000${query.toLowerCase()}\u0000${cursor ?? ''}`;
-    const cached = this.cache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return structuredClone(cached.value);
+    return this.cachedResult(cacheKey, () => this.searchResult(query, market, cursor));
+  }
 
+  private async searchResult(query: string, market: string, cursor?: string): Promise<CatalogSearchResult> {
     const searchUrl = new URL('https://apps.microsoft.com/api/products/search');
     for (const [key, value] of Object.entries({ query, mediaType: 'games', age: 'all', price: 'all', category: 'all', subscription: 'all', gl: market, hl: 'en-us' })) {
       searchUrl.searchParams.set(key, value);
@@ -456,27 +738,124 @@ export class CatalogService {
     const searchResponse = await this.fetcher(searchUrl, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
     if (!searchResponse.ok) throw new Error(`Microsoft Store search returned HTTP ${searchResponse.status}.`);
     const search = await searchResponse.json() as StoreSearchResponse;
-    const value = await this.result(search, query, market, true);
-    this.cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, value });
-    return structuredClone(value);
+    return this.result(search, query, market, true);
   }
 
   async featured(rawMarket: string): Promise<CatalogSearchResult> {
     const market = normalizeMarket(rawMarket);
     const cacheKey = `${market}\u0000featured`;
-    const cached = this.cache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return structuredClone(cached.value);
+    return this.cachedResult(cacheKey, () => this.featuredResult(market));
+  }
+
+  /** Read one public Store recommendation feed, bounded to a fixed page count. */
+  private async collectionPage(listName: string, market: string, page: number): Promise<StoreSearchResponse & { title?: unknown }> {
     const url = new URL('https://apps.microsoft.com/api/Reco/GetComputedProductsList');
     for (const [key, value] of Object.entries({
-      listName: 'TopTrending', pgNo: '1', noItems: '12', filteredCategories: 'AllProducts',
+      listName, pgNo: String(page), noItems: String(FEATURED_PAGE_ITEMS), filteredCategories: 'AllProducts',
       mediaType: 'Games', gl: market, hl: 'en-us', exp: '0',
     })) url.searchParams.set(key, value);
     const response = await this.fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
-    if (!response.ok) throw new Error(`Microsoft Store featured collection returned HTTP ${response.status}.`);
-    const search = await response.json() as StoreSearchResponse & { title?: unknown };
-    const value = await this.result(search, string(search.title) ?? 'Trending games', market, false);
-    this.cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, value });
-    return structuredClone(value);
+    if (!response.ok) throw new Error(`Microsoft Store ${listName} collection returned HTTP ${response.status}.`);
+    return await response.json() as StoreSearchResponse & { title?: unknown };
+  }
+
+  private async computedCollection(listName: string, market: string, pages: number, firstPage = 1): Promise<StoreSearchResponse & { title?: unknown; nextPage?: number }> {
+    const collected: StoreSearchProduct[] = [];
+    let title: unknown;
+    let page = firstPage;
+    // `nextPage` stays set only when this bounded read stopped while the feed
+    // still offered its exact documented continuation.
+    let nextPage: number | undefined;
+    for (let index = 0; index < pages; index += 1) {
+      const payload = await this.collectionPage(listName, market, page);
+      title = title ?? payload.title;
+      const products = Array.isArray(payload.productsList) ? payload.productsList as StoreSearchProduct[] : [];
+      collected.push(...products);
+      nextPage = undefined;
+      if (payload.hasMorePages !== true || products.length === 0) break;
+      // Captured contract (US pages 1..10, CZ pages 1..3, TopPaid pages 1..3):
+      // a continuation names exactly the next page while hasMorePages is true,
+      // and the end of a feed reports nextPageNumber -1 with hasMorePages
+      // false. Any other value (string, fraction, repeat, jump, sentinel) stops
+      // pagination and keeps the products already collected instead of
+      // following it, so the request budget cannot be redirected.
+      if (payload.nextPageNumber !== page + 1) break;
+      nextPage = page + 1;
+      page += 1;
+    }
+    return { productsList: collected, title, nextPage };
+  }
+
+  private async featuredResult(market: string): Promise<CatalogSearchResult> {
+    // Two honest public collections. Trending games are dominated by
+    // free-to-play offers that the public browsing policy must hide, so the top
+    // paid games collection supplies the real breadth of the landing page.
+    // Each feed is bounded by FEATURED_*_PAGES and served from the ten minute
+    // cache, so a page load never becomes an unbounded request fan-out.
+    const [trending, paid] = await Promise.allSettled([
+      this.computedCollection('TopTrending', market, FEATURED_TRENDING_PAGES),
+      this.computedCollection('TopPaid', market, FEATURED_PAID_PAGES),
+    ]);
+    if (trending.status === 'rejected' && paid.status === 'rejected') {
+      throw trending.reason instanceof Error ? trending.reason : new Error('Microsoft Store featured collections could not be loaded.');
+    }
+    let merged = mergeCollections(
+      ...(trending.status === 'fulfilled' ? [trending.value] : []),
+      ...(paid.status === 'fulfilled' ? [paid.value] : []),
+    );
+    const title = string(trending.status === 'fulfilled' ? trending.value.title : undefined)
+      ?? string(paid.status === 'fulfilled' ? paid.value.title : undefined)
+      ?? 'Featured games';
+    // The continuation names the next unread paid page of the read that really
+    // happened. A paid read that failed while trending worked restarts the paid
+    // feed from its first page, so no paid item is silently skipped.
+    let nextPage = paid.status === 'fulfilled' ? paid.value.nextPage : undefined;
+    if (paid.status !== 'fulfilled') {
+      const cursor = `paid-${BROWSE_FIRST_PAGE}`;
+      return { ...await this.result(merged, title, market, false, 'featured'), cursor, hasMore: true };
+    }
+    const details = await this.detailMap(catalogProductIds(merged), market);
+    let result = await this.result(merged, title, market, false, 'featured', { Products: [...details.values()] });
+    let paidPages = FEATURED_PAID_PAGES;
+    while (result.products.length < FEATURED_MIN_ITEMS && nextPage !== undefined && nextPage <= BROWSE_LAST_PAGE && paidPages < FEATURED_MAX_PAID_PAGES) {
+      const page = nextPage;
+      try {
+        const extra = await this.computedCollection('TopPaid', market, 1, page);
+        merged = mergeCollections(merged, extra);
+        nextPage = extra.nextPage;
+        paidPages += 1;
+        await this.detailMap(catalogProductIds(extra), market, details);
+        result = await this.result(merged, title, market, false, 'featured', { Products: [...details.values()] });
+      } catch {
+        // Keep the standalone games already read; browsing can still recover
+        // the failed official page through the ordinary continuation.
+        break;
+      }
+    }
+    const cursor = nextPage === undefined || nextPage > BROWSE_LAST_PAGE ? undefined : `paid-${nextPage}`;
+    return { ...result, cursor, hasMore: Boolean(cursor) };
+  }
+
+  /** Continue the public landing collection after the bounded featured set.
+   * One upstream page per call, one shared page per cursor and the same public
+   * browsing policy as the landing page, so demos, trials and free offers stay
+   * excluded. An unknown, repeated or out-of-budget cursor never starts a
+   * request. */
+  async browse(rawMarket: string, rawCursor?: string): Promise<CatalogSearchResult> {
+    const market = normalizeMarket(rawMarket);
+    const page = browsePage(rawCursor);
+    return this.cachedResult(`${market}\u0000browse\u0000${page}`, () => this.browseResult(market, page));
+  }
+
+  private async browseResult(market: string, page: number): Promise<CatalogSearchResult> {
+    const payload = await this.collectionPage(BROWSE_COLLECTION, market, page);
+    const title = string(payload.title) ?? 'Top paid games';
+    const rows = Array.isArray(payload.productsList) ? payload.productsList as StoreSearchProduct[] : [];
+    const result = await this.result(payload, title, market, false, 'featured');
+    // Continue only on the documented exact continuation of a non-empty page.
+    const next = rows.length > 0 && payload.hasMorePages === true &&
+      payload.nextPageNumber === page + 1 && page + 1 <= BROWSE_LAST_PAGE;
+    return { ...result, cursor: next ? `paid-${page + 1}` : undefined, hasMore: next };
   }
 
   async posters(ids: string[], rawMarket: string): Promise<Map<string, string>> {
@@ -519,5 +898,88 @@ export class CatalogService {
       }
     }
     return artwork;
+  }
+
+  /**
+   * Map missing social-profile artwork from an Xbox title ID to the public
+   * Store cover. A returned product is used only when its AlternateIds contain
+   * exactly the requested title ID, so a similar name can never substitute a
+   * guessed cover. Lookups are deduplicated, coalesced, cached and bounded;
+   * callers keep their existing placeholder when a title has no Store product.
+   */
+  async artworkForXboxTitleIds(titleIds: string[], rawMarket: string): Promise<Map<string,string>> {
+    const market = normalizeMarket(rawMarket);
+    const unique = titleIds
+      .map(value => value.trim())
+      .filter(value => /^\d{1,10}$/.test(value) && Number(value) > 0 && Number(value) <= 0xffffffff)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .slice(0, TITLE_ARTWORK_LOOKUPS_PER_CALL);
+    const artwork = new Map<string,string>();
+    if (!unique.length) return artwork;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TITLE_ARTWORK_DEADLINE_MS);
+    timer.unref?.();
+    const budget = controller.signal;
+    const queue = [...unique];
+    try {
+      const worker = async () => {
+        while (queue.length && !budget.aborted) {
+          const titleId = queue.shift()!;
+          const key = `${market}\u0000${titleId}`;
+          const cached = this.titleArtworkCache.get(key);
+          if (cached && cached.until > Date.now()) {
+            if (cached.value) artwork.set(titleId, cached.value);
+            continue;
+          }
+          if (cached) this.titleArtworkCache.delete(key);
+          let request = this.titleArtworkRequests.get(key);
+          if (!request) {
+            if (budget.aborted || this.titleArtworkRequests.size >= TITLE_ARTWORK_REQUESTS_LIMIT) continue;
+            request = this.fetchTitleArtwork(titleId, market)
+              .then(value => {
+                while (this.titleArtworkCache.size >= TITLE_ARTWORK_CACHE_LIMIT) this.titleArtworkCache.delete(this.titleArtworkCache.keys().next().value!);
+                this.titleArtworkCache.set(key, {until: Date.now() + (value ? TITLE_ARTWORK_TTL_MS : TITLE_ARTWORK_NEGATIVE_TTL_MS), value});
+                return value;
+              })
+              .finally(() => { this.titleArtworkRequests.delete(key); });
+            this.titleArtworkRequests.set(key, request);
+          }
+          // Artwork is optional: a failed lookup never fails the profile, and
+          // an expired caller stops waiting without cancelling shared work.
+          try {
+            const value = await raceCallerDeadline(request, budget);
+            if (value !== TITLE_ARTWORK_EXPIRED && value) artwork.set(titleId, value);
+          } catch {}
+        }
+      };
+      await Promise.all(Array.from({length: Math.min(TITLE_ARTWORK_CONCURRENCY, unique.length)}, worker));
+      return artwork;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async fetchTitleArtwork(titleId: string, market: string): Promise<string | undefined> {
+    const url = new URL('https://displaycatalog.mp.microsoft.com/v7.0/products/lookup');
+    url.searchParams.set('alternateId', 'XboxTitleID');
+    url.searchParams.set('value', titleId);
+    url.searchParams.set('market', market);
+    url.searchParams.set('languages', 'en-us,neutral');
+    url.searchParams.set('fieldsTemplate', 'Details');
+    const response = await this.fetcher(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TITLE_ARTWORK_REQUEST_TIMEOUT_MS) });
+    if (!response.ok) return undefined;
+    const catalog = await response.json() as DisplayCatalogResponse;
+    const products = Array.isArray(catalog?.Products) ? catalog.Products : [];
+    if (products.length > 25) return undefined;
+    for (const entry of products) {
+      const product = object(entry);
+      if (!product || product.ProductType !== 'Game') continue;
+      if (catalogXboxTitleId(product.AlternateIds) !== titleId) continue;
+      const localized = Array.isArray(product.LocalizedProperties) ? object(product.LocalizedProperties[0]) : undefined;
+      const images = Array.isArray(localized?.Images) ? localized.Images as DisplayCatalogImage[] : [];
+      const cover = displayImage(images.filter(image => object(image)), POSTER_PURPOSES);
+      if (cover) return cover;
+    }
+    return undefined;
   }
 }

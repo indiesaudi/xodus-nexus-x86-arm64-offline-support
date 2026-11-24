@@ -1,7 +1,7 @@
 import { ui } from './i18n';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, Clock3, Download, Gamepad2, Images, LoaderCircle, MoreHorizontal, RefreshCw, X } from 'lucide-react';
-import type { AppSnapshot, Game, GameActivity, GameStoreDetails } from '../shared/types';
+import type { AppSnapshot, Game, GameActivity, GameDetailsTarget, GameStoreDetails } from '../shared/types';
 import './game-details.css';
 import { Achievements } from './Achievements';
 
@@ -26,7 +26,7 @@ function activityNote(activity?: GameActivity): string {
 function Artwork({ src, alt, ...props }: { src?: string; alt: string; className?: string; loading?: 'lazy' }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
-  return src && !failed ? <img src={src} alt={alt} {...props} referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : <span className="gd-artwork-unavailable"><Gamepad2 /><span>{alt || ui("ui.artwork_unavailable_f4d58d3")}</span></span>;
+  return src && !failed ? <img src={src} alt={alt} {...props} referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : alt ? <span className="gd-artwork-unavailable"><Gamepad2 /><span>{alt}</span></span> : null;
 }
 
 export function Gallery({ title, images, initial, close }: { title: string; images: string[]; initial: number; close: () => void }) {
@@ -59,6 +59,9 @@ export function Gallery({ title, images, initial, close }: { title: string; imag
 interface PageProps {
   game: Pick<Game,'id'|'title'|'publisher'|'coverUrl'|'heroUrl'> & {installState?:Game['installState']};
   catalogProductId?: string;
+  /** Read-only public Store metadata identity. It never changes activity,
+   * achievements, Play or any account/install decision. */
+  publicMetadataProductId?: string;
   detailId?: string;
   back: () => void;
   backLabel?: string;
@@ -145,7 +148,6 @@ export function GameDetailsContent({ game, detailId,back, backLabel, play, manag
         </div>
         <aside className="gd-facts"><h2>{ui("ui.game_information_978fa44")}</h2><dl><div><dt>{ui("ui.publisher_2137854")}</dt><dd>{details?.publisher ?? game.publisher ?? ui("ui.unavailable_ca18449")}</dd></div><div><dt>{ui("ui.release_date_bd84924")}</dt><dd>{release ?? ui("ui.unavailable_ca18449")}</dd></div><div><dt>{ui("ui.categories_b8b1d89")}</dt><dd>{details?.categories.length ? details.categories.join(' · ') : ui("ui.unavailable_ca18449")}</dd></div>{details ? <div><dt>{ui("ui.metadata_source_7be21e8")}</dt><dd>Microsoft Store</dd></div> : null}</dl>{technical?<details><summary>{ui("ui.installation_details_7ee3b59")}</summary>{technical}</details>:null}</aside>
       </div>
-      <p className="gd-disclaimer">{ui("ui.xbox_activity_may_be_delayed_or_unavailable_for_c15dd35")}</p>
     </div>
     {gallery !== undefined && images.length ? <Gallery title={game.title} images={images} initial={gallery} close={() => setGallery(undefined)} /> : null}
   </section>;
@@ -154,6 +156,9 @@ export function GameDetailsContent({ game, detailId,back, backLabel, play, manag
 export function GameDetails(props: PageProps & { data: AppSnapshot }) {
   const { game, data } = props;
   const target=useMemo(()=>props.catalogProductId?{productId:props.catalogProductId}:game.id,[game.id,props.catalogProductId]);
+  // Descriptive metadata may come from public Store browsing; the identity target
+  // above still drives Play, activity and achievements on the account market.
+  const metadataTarget=useMemo<GameDetailsTarget>(()=>props.publicMetadataProductId?{productId:props.publicMetadataProductId,scope:'public-store'}:target,[props.publicMetadataProductId,target]);
   const [details, setDetails] = useState<GameStoreDetails>();
   const [metadataLoading, setMetadataLoading] = useState(true);
   const [metadataError, setMetadataError] = useState(false);
@@ -162,13 +167,14 @@ export function GameDetails(props: PageProps & { data: AppSnapshot }) {
   const request = useRef(0);
   useEffect(() => {
     let live = true; setDetails(undefined); setMetadataLoading(true); setMetadataError(false);
-    window.launcher.getGameDetails(target).then(value => { if (live) setDetails(value); }).catch(() => { if (live) setMetadataError(true); }).finally(() => { if (live) setMetadataLoading(false); });
+    window.launcher.getGameDetails(metadataTarget).then(value => { if (live) setDetails(value); }).catch(() => { if (live) setMetadataError(true); }).finally(() => { if (live) setMetadataLoading(false); });
     return () => { live = false; };
-  }, [target, data.settings.market]);
+  }, [metadataTarget, data.settings.market]);
   const loadActivity = useCallback((refresh = false) => {
     const id = ++request.current; setActivityLoading(true);
     void window.launcher.getGameActivity(target, refresh).then(value => { if (request.current === id) setActivity(value); }).catch(() => { if (request.current === id) setActivity({ status: 'error' }); }).finally(() => { if (request.current === id) setActivityLoading(false); });
-  }, [target, data.auth.username, data.auth.stored, data.auth.running, data.backend.binaryPath, data.backend.capabilities.gameActivity, data.settings.market]);
-  useEffect(() => { setActivity(undefined); loadActivity(); return () => { request.current++; }; }, [loadActivity]);
+  }, [target, data.auth.username, data.auth.player, data.auth.stored, data.auth.running, data.backend.binaryPath, data.backend.capabilities.gameActivity, data.settings.market]);
+  const finishedSession = data.gameOperation?.gameId === game.id && data.gameOperation.kind !== 'prerequisite' ? data.gameOperation.finishedAt : undefined;
+  useEffect(() => { setActivity(undefined); loadActivity(Boolean(finishedSession)); return () => { request.current++; }; }, [loadActivity, finishedSession]);
   return <GameDetailsContent {...props} details={details} activity={activity} metadataLoading={metadataLoading} metadataError={metadataError} activityLoading={activityLoading} refresh={() => loadActivity(true)} achievements={<Achievements gameId={game.id} target={target} title={game.title} data={data} />} />;
 }

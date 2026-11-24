@@ -1,3 +1,4 @@
+import {gameRuntimeSelection,runtimeBuildApproval,runtimePrefixAnchors,runtimePrefixIdentity} from '../shared/runtime-selection.js';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -8,7 +9,8 @@ import {defaultXboxOverlay,xboxOverlaySettings,xboxOverlayPatch} from '../shared
 import { DEFAULT_SHADER_CACHE_GIB, shaderCacheLimits } from '../shared/shader-cache.js';
 import { interfaceLanguagePreference } from '../shared/interface-language.js';
 import { resolvePackageFile } from './windows-path.js';
-import { parsePackageXml } from './package-xml.js';
+import { legacyCachyosState } from './legacy-runtime-state.js';
+import { parsePackageXml, XmlNode } from './package-xml.js';
 import { hasIncompleteUpdate, INCOMPLETE_UPDATE_MESSAGE } from './installation-state.js';
 import { manifestAttr as attr, manifestText as text, manifestElements, manifestAttribute } from './manifest-xml.js';
 
@@ -16,10 +18,14 @@ interface PersistedState {
   games: Game[];
   downloads: DownloadTask[];
   settings: Settings;
+  /** One-time 0.5 migration marker. It is state metadata, never a UI setting. */
+  runtimeFamilyMigration?: number;
 }
 
 const defaultDataRoot = path.join(os.homedir(), '.local', 'share', 'xodus-nexus');
 const defaultSettings: Settings = {
+  closeToTray: false,
+  multiAccountEnabled: false,
   interfaceLanguage: 'system',
   installRoot: path.join(os.homedir(), 'Games', 'Xodus Nexus'),
   market: 'neutral',
@@ -43,8 +49,10 @@ export class StateStore {
   }
 
   async load(): Promise<void> {
+    let loaded = false, migration: unknown;
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8')) as Partial<PersistedState>;
+      loaded = true; migration = parsed.runtimeFamilyMigration;
       let downloadLimitMiB = 0;
       try { downloadLimitKiB(parsed.settings?.downloadLimitMiB); downloadLimitMiB = parsed.settings?.downloadLimitMiB ?? 0; } catch { /* Ignore invalid saved preference; show the default in Settings. */ }
       let shaderCacheLimitGiB = DEFAULT_SHADER_CACHE_GIB;
@@ -62,10 +70,35 @@ export class StateStore {
             ...task, status: 'paused' as const, canPause: true, controlPending: false,
             transferRate: undefined, phase: 'Paused — resume to reconnect and restore saved download checkpoints',
           } : task) : [],
-        settings: Object.fromEntries(Object.entries({ ...defaultSettings, ...parsed.settings, ...xboxOverlaySettings(parsed.settings??{}), downloadLimitMiB, shaderCacheLimitGiB, interfaceLanguage: interfaceLanguagePreference(parsed.settings?.interfaceLanguage) }).filter(([key]) => key !== 'separateGameProcess')) as unknown as Settings,
+        settings: Object.fromEntries(Object.entries({ ...defaultSettings, ...parsed.settings, ...xboxOverlaySettings(parsed.settings??{}), downloadLimitMiB, shaderCacheLimitGiB, closeToTray: parsed.settings?.closeToTray === true, multiAccountEnabled: parsed.settings?.multiAccountEnabled === true, interfaceLanguage: interfaceLanguagePreference(parsed.settings?.interfaceLanguage) }).filter(([key]) => key !== 'separateGameProcess')) as unknown as Settings,
+        runtimeFamilyMigration: parsed.runtimeFamilyMigration === 1 ? 1 : undefined,
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('State could not be loaded', error);
+    }
+    if (loaded) await this.migrateRuntimeFamily(migration);
+  }
+
+  /** One-time preservation of the effective old global CachyOS choice. It is
+   * driven only by the strict verified legacy pointer, never by a guessed
+   * setting, and it changes no prefix, save or current pointer. */
+  private async migrateRuntimeFamily(migration: unknown): Promise<void> {
+    if (migration === 1) return;
+    try {
+      const legacy = await legacyCachyosState(this.state.settings.runtimeRoot, this.state.settings.winePath);
+      if (legacy) {
+        for (const game of this.state.games) {
+          if (game.runtime === undefined || game.runtime === 'default') game.runtime = 'nexus-cachyos';
+        }
+        this.state.runtimeFamilyMigration = 1;
+        // Persist only when the one-time CachyOS choice was actually adopted.
+        // A Standard or first-run profile keeps its existing state file unchanged
+        // until the normal settings/game save that follows migration.
+        await this.save();
+      }
+      else this.state.runtimeFamilyMigration = 1;
+    } catch (error) {
+      console.warn('Runtime family migration could not be saved', error);
     }
   }
 
@@ -86,6 +119,8 @@ export class StateStore {
   }
 
   async setSettings(patch: Partial<Settings>): Promise<Settings> {
+    if (patch.multiAccountEnabled !== undefined && typeof patch.multiAccountEnabled !== 'boolean') throw Error('Invalid account-management setting.');
+    if (patch.closeToTray !== undefined && typeof patch.closeToTray !== 'boolean') throw Error('Invalid close-to-tray setting.');
     const overlay=xboxOverlayPatch(patch);patch={...patch,...overlay};
     if (patch.interfaceLanguage !== undefined && interfaceLanguagePreference(patch.interfaceLanguage) !== patch.interfaceLanguage) throw Error('Invalid interface language.');
     if (patch.downloadLimitMiB !== undefined) downloadLimitKiB(patch.downloadLimitMiB);
@@ -106,9 +141,29 @@ export class StateStore {
   async patchGame(id: string, patch: Partial<Game>): Promise<Game> {
     const game = this.state.games.find((entry) => entry.id === id);
     if (!game) throw new Error('Game not found.');
+    if ('runtime' in patch) patch.runtime = gameRuntimeSelection(patch.runtime);
+    if ('runtimeSeparatePrefix' in patch && typeof patch.runtimeSeparatePrefix !== 'boolean') throw Error('Invalid runtime prefix choice.');
+    if ('runtimePrefixes' in patch) patch.runtimePrefixes=runtimePrefixAnchors(patch.runtimePrefixes);
+    if ('runtimePrefixIdentity' in patch) patch.runtimePrefixIdentity=patch.runtimePrefixIdentity===undefined?undefined:runtimePrefixIdentity(patch.runtimePrefixIdentity);
+    if ('runtimeBuild' in patch && patch.runtimeBuild !== undefined) patch.runtimeBuild=runtimeBuildApproval(patch.runtimeBuild);
     Object.assign(game, patch);
     await this.save();
     return game;
+  }
+
+  async patchGames(updates: readonly { id: string; patch: Partial<Game> }[]): Promise<void> {
+    if (!updates.length) return;
+    const games = new Map(this.state.games.map(game => [game.id, game]));
+    // Validate the complete batch before changing any in-memory entry.
+    const targets = updates.map(update => {
+      const game = games.get(update.id);
+      if (!game) throw new Error('Game not found.');
+      return { game, patch: update.patch };
+    });
+    for (const { game, patch } of targets) Object.assign(game, patch);
+    // Keep the same awaited durability/error semantics as patchGame, including
+    // retry after a failed write even if the in-memory values already match.
+    await this.save();
   }
 
   async removeGame(id: string): Promise<void> {
@@ -162,6 +217,24 @@ async function beginsWithMz(file: string): Promise<boolean> {
   }
 }
 
+function getFirstValidConfigExecutable(configXml: XmlNode | undefined): string | undefined {
+  if (!configXml) return;
+
+  const configExecutables = manifestElements(configXml, "Executable")
+  if (!configExecutables) return;
+
+  for (const executable of configExecutables) {
+    const isDevOnly = manifestAttribute(executable, "isDevOnly")
+    const name = manifestAttribute(executable, "Name")
+    if ( (isDevOnly !== undefined) && (isDevOnly === "false") && (name !== undefined)) {
+      return name
+    } else if ((isDevOnly === undefined) && (name !== undefined)) {
+      return name
+    }
+  }
+  return;
+}
+
 export async function inspectGameDirectory(directory: string): Promise<Game> {
   const canonical = await fs.realpath(directory);
   // GDK titles are authored on Windows, where the manifest name is
@@ -182,8 +255,9 @@ export async function inspectGameDirectory(directory: string): Promise<Game> {
   const title = attr(configXml, 'ShellVisuals', 'DefaultDisplayName')
     ?? text(appxXml, 'DisplayName')
     ?? path.basename(canonical);
-  const executable = attr(configXml, 'Executable', 'Name')
+  const executable = getFirstValidConfigExecutable(configXml)
     ?? attr(appxXml, 'Application', 'Executable');
+
   const storeId = text(configXml, 'StoreId');
   const publisher = attr(configXml, 'ShellVisuals', 'PublisherDisplayName')
     ?? text(appxXml, 'PublisherDisplayName');

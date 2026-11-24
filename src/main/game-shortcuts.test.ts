@@ -12,6 +12,31 @@ const execute = promisify(execFile);
 const id = '0123456789abcdef';
 const game = { id, title: 'A game\nExec=unwanted', installState: 'ready' as const };
 
+it('matches game windows to a hidden profile-specific entry and preserves it when creating a shortcut', async () => {
+  const f = await fixture();
+  try {
+    await f.shortcuts.initialize();
+    const png = Buffer.from('89504e470d0a1a0a00010203', 'hex');
+    const identity = await f.shortcuts.windowIdentity(game, png);
+    expect(identity).toMatch(/^xodus-nexus-game-[a-f0-9]{12}-0123456789abcdef$/);
+    const target = path.join(f.locations.applications, identity + '.desktop');
+    const body = await fs.readFile(target, 'utf8');
+    expect(body).toContain('NoDisplay=true\n');
+    expect(body).toContain(`StartupWMClass=${identity}\n`);
+    expect(body.match(/^Exec=/gm)).toHaveLength(1);
+    const icon = path.join(f.locations.userData, 'shortcuts/icons', id + '.png');
+    expect(body).toContain(`Icon=${icon}\n`);
+    expect(await fs.readFile(icon)).toEqual(png);
+    await f.shortcuts.create(game, 'applications');
+    expect(await fs.readFile(target, 'utf8')).toBe(body);
+    expect(await f.shortcuts.windowIdentity(game)).toBe(identity);
+    await fs.writeFile(target, 'unrelated');
+    await expect(f.shortcuts.windowIdentity(game)).rejects.toThrow('unrelated');
+    expect(await fs.readFile(target, 'utf8')).toBe('unrelated');
+    await expect(f.shortcuts.windowIdentity({ ...game, id: '../bad' })).rejects.toThrow('identity');
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
 it('writes safe persistent desktop descriptors for live Steam imports without touching user application menus', async () => {
   const f = await fixture();
   try {
@@ -26,7 +51,7 @@ it('writes safe persistent desktop descriptors for live Steam imports without to
     expect((await fs.stat(prepared.file)).mode & 0o777).toBe(0o600);
     await expect(fs.access(f.locations.applications)).rejects.toThrow();
     const nexus = await f.shortcuts.steamDesktop();
-    expect(await fs.readFile(nexus.file, 'utf8')).toContain('Name=Xodus Nexus\n');
+    expect(await fs.readFile(nexus.file, 'utf8')).toContain('Name=Nexus Launcher\n');
     await fs.writeFile(prepared.file, 'unrelated user file');
     await expect(f.shortcuts.steamDesktop(game)).rejects.toThrow('unrelated');
     expect(await fs.readFile(prepared.file, 'utf8')).toBe('unrelated user file');
@@ -43,7 +68,7 @@ it('creates Steam launch descriptions without unwanted desktop/menu entries and 
     expect((await execute('/bin/sh', [path.join(f.locations.userData, 'shortcuts/launch-game'), id])).stdout.trim())
       .toBe(`--nexus-profile ${f.locations.userData} --launch-game ${id}`);
     const nexus = await f.shortcuts.steamLaunch();
-    expect(nexus.title).toBe('Xodus Nexus');
+    expect(nexus.title).toBe('Nexus Launcher');
     expect(nexus.identity).not.toBe(steam.identity);
     expect((await execute('/bin/sh', [path.join(f.locations.userData, 'shortcuts/launch-nexus')])).stdout.trim())
       .toBe(`--nexus-profile ${f.locations.userData}`);
@@ -164,7 +189,7 @@ it('migrates a legacy hash entry and removes only its own old title after explic
 it('sanitizes path separators, controls and reserved punctuation and bounds UTF8 filenames', () => {
   expect(shortcutTitleStem('Shift At Midnight')).toBe('Shift At Midnight');
   expect(shortcutTitleStem('../../Game: A/B\\C?\n')).toBe('Game A B C');
-  expect(shortcutTitleStem('../\0')).toBe('Xodus Nexus game');
+  expect(shortcutTitleStem('../\0')).toBe('Nexus Launcher game');
   expect(shortcutTitleStem('Příliš žluťoučký kůň')).toBe('Příliš žluťoučký kůň');
   for(const title of ['A'.repeat(1000),'猫'.repeat(1000),'é'.repeat(1000)]) {
     const stem=shortcutTitleStem(title);
@@ -243,9 +268,11 @@ it('coalesces duplicate requests, refuses concurrent games, and recovers after s
     active = value;
   });
   const pending = router.request(id);
-  await router.request(id);
+  let duplicateFinished = false;
+  const duplicate = router.request(id).then(() => { duplicateFinished = true; });
   await expect(router.request('fedcba9876543210')).rejects.toThrow('Another game');
-  expect(calls).toEqual([id]); finish(); await pending;
+  expect(calls).toEqual([id]); expect(duplicateFinished).toBe(false);
+  finish(); await Promise.all([pending, duplicate]); expect(duplicateFinished).toBe(true);
   await router.request(id); expect(calls).toEqual([id]);
   await expect(router.request('fedcba9876543210')).rejects.toThrow('Another game');
   const failure = new ShortcutLaunch(() => undefined, async () => { throw Error('missing runtime'); });
@@ -265,5 +292,21 @@ it('follows the stable launcher symlink after an update instead of pinning its r
     await fs.unlink(stable);await fs.symlink(updated,stable);
     expect((await execute('/bin/sh',[helper,id])).stdout).toBe('updated');
     expect(await shortcutLauncherPath(f.locations.launcher,updated)).toBe(f.locations.launcher);
+  }finally{await fs.rm(f.root,{recursive:true,force:true});}
+});
+
+it('prefers the canonical stable launcher link and still follows the legacy link',async()=>{
+  const f=await fixture();
+  try{
+    const legacy=path.join(f.root,'Xodus-Nexus.AppImage');await fs.symlink(f.locations.launcher,legacy);
+    expect(await shortcutLauncherPath(f.locations.launcher)).toBe(legacy);
+    const canonical=path.join(f.root,'Nexus-Launcher.AppImage');await fs.symlink(f.locations.launcher,canonical);
+    expect(await shortcutLauncherPath(f.locations.launcher)).toBe(canonical);
+    const shortcuts=new GameShortcuts({...f.locations,launcher:canonical});await shortcuts.initialize();
+    const helper=path.join(f.locations.userData,'shortcuts/launch-game');
+    expect((await execute('/bin/sh',[helper,id])).stdout).toContain('--launch-game '+id);
+    const updated=path.join(f.root,'updated');await fs.writeFile(updated,'#!/bin/sh\nprintf updated\n',{mode:0o700});
+    await fs.unlink(canonical);await fs.symlink(updated,canonical);
+    expect(await shortcutLauncherPath(f.locations.launcher)).toBe(legacy);
   }finally{await fs.rm(f.root,{recursive:true,force:true});}
 });

@@ -35,7 +35,11 @@ export function parseLaunchOptions(input: string): { environment: Record<string,
   while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prefix[0] ?? '')) {
     const assignment = prefix.shift()!, equals = assignment.indexOf('=');
     const name = assignment.slice(0, equals);
-    if (/^(?:WINEPREFIX|WINEARCH|WINE_DLL_FILE_MAP|XODUS_.*|STEAM_COMPAT_.*)$/.test(name)) throw Error(`${name} is managed by Nexus and cannot be overridden in launch options.`);
+    // Proton reads its documented compat-config channel from the launch
+    // environment. The value only adds compat option names and appends argv
+    // data inside the Proton script, so a game may set it. Every other
+    // STEAM_COMPAT_* variable and the prefix/identity variables stay managed.
+    if (name !== 'STEAM_COMPAT_CONFIG' && /^(?:WINEPREFIX|WINEARCH|WINE_DLL_FILE_MAP|XODUS_.*|STEAM_COMPAT_.*)$/.test(name)) throw Error(`${name} is managed by Nexus and cannot be overridden in launch options.`);
     environment[name] = assignment.slice(equals + 1);
   }
   return { environment, prefix, gameArgs: marker < 0 ? [] : words.slice(marker + 1) };
@@ -47,7 +51,8 @@ export function normalizeLaunchTools(value: unknown): GameLaunchTools {
   const tools = value as Record<string, unknown>;
   if (typeof tools.mangoHud !== 'boolean' || typeof tools.gamescope !== 'boolean' || typeof tools.gamescopeArgs !== 'string' || typeof tools.launchOptions !== 'string') throw Error('Invalid game launch tools.');
   if (tools.dualSenseCompatibility !== undefined && typeof tools.dualSenseCompatibility !== 'boolean') throw Error('Invalid DualSense compatibility setting.');
-  const result = { dualSenseCompatibility: tools.dualSenseCompatibility ?? false, mangoHud: tools.mangoHud, gamescope: tools.gamescope, gamescopeArgs: tools.gamescopeArgs.trim(), launchOptions: tools.launchOptions.trim() };
+  if (tools.dualShock4Compatibility !== undefined && typeof tools.dualShock4Compatibility !== 'boolean') throw Error('Invalid DualShock 4 compatibility setting.');
+  const result = { ...(tools.dualShock4Compatibility !== undefined ? {dualShock4Compatibility:tools.dualShock4Compatibility} : {}), dualSenseCompatibility: tools.dualSenseCompatibility ?? false, mangoHud: tools.mangoHud, gamescope: tools.gamescope, gamescopeArgs: tools.gamescopeArgs.trim(), launchOptions: tools.launchOptions.trim() };
   const args = commandWords(result.gamescopeArgs);
   if (args.includes('--') || args.some(arg => arg.includes('%command%'))) throw Error('Gamescope options must not include -- or %command%; Nexus adds the game command.');
   parseLaunchOptions(result.launchOptions);

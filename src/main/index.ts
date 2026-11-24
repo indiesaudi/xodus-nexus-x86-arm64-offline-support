@@ -1,7 +1,18 @@
-import type {XboxProfileRequest} from '../shared/types.js';
+import { ComponentUpdateAdmission, type ComponentUpdateOwner } from './component-update-admission.js';
+import { ComponentUpdates, type PreparedComponentUpdate } from './component-updates.js';
+import { prepareManagedComponentUpdates } from './component-update-runtime.js';
+import {gameRuntimeReadiness} from './game-runtime-readiness.js';
+import {guardedRuntimeSettings,type RuntimeSettingsRequest} from './runtime-settings.js';
+import {gameRuntimeSelection} from '../shared/runtime-selection.js';
+import {resolveGameRuntime,bindRuntimePrefix,gameRuntimeParameters} from './runtime-prefix-binding.js';
+import {resolveRuntimeFamily} from './runtime-families.js';
+import {desktopTrayAvailable} from './launcher-tray-desktop.js';
+import {LauncherTray} from './launcher-tray.js';
+import {SteamKeyboard} from './steam-keyboard.js';
+import type {XboxProfileGames,XboxProfileRequest} from '../shared/types.js';
 import {XboxSocial as NativeXboxSocial} from './xbox-native-social.js';
 import {resetSocialTransport} from './xbox-social-transport.js';
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, net, Notification, powerSaveBlocker, screen, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, net, Notification, powerSaveBlocker, screen, shell, Tray, Menu } from 'electron';
 import { constants, createWriteStream, promises as fs, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -12,35 +23,44 @@ import type { AppSnapshot, AuthStatus, ConnectivityStatus, DownloadTask, Game, O
 import { downloadFailure, safeProductId } from '../shared/utils.js';
 import { contentLicenseFailure } from '../shared/content-license.js';
 import { interfaceLanguagePreference } from '../shared/interface-language.js';
+import {preserveLauncherIdentity,launcherDisplayName} from './launcher-identity.js';
 import { nativeTranslator } from './interface-language.js';
 import { downloadLimitArgs, downloadLimitKiB } from '../shared/download-bandwidth.js';
 import { DownloadBandwidthControls, isBandwidthOnlyPatch } from './download-bandwidth.js';
 import { isShaderCacheOnlyPatch, shaderCacheLimits } from '../shared/shader-cache.js';
 import { demoAccountLibrary, demoAccountProducts, demoDownloads, demoGames, demoLaunchOptions, demoLocales, demoSnapshot, type DemoArtwork } from '../shared/demo-data.js';
+import { registerDemoSocialIpc } from './demo-social-ipc.js';
 import { backendLock } from './backend-package.js';
 import {XboxGameGuide,checkGuideHost} from './xbox-game-guide.js';
 import {XboxGuideParty} from './xbox-guide-party.js';
 import {XboxOverlayShortcut,ensureOverlayDesktopEntry} from './xbox-overlay-shortcut.js';
 import {xboxOverlaySettings,xboxOverlayPatch} from '../shared/xbox-overlay-settings.js';
 import { BackendManager } from './backend.js';
+import { backendHttpStatus } from './backend-releases.js';
 import { run, spawnTracked } from './process.js';
 import { inspectGameDirectory, StateStore } from './store.js';
+import { inspectStartupLibrary } from './startup-library.js';
 import { hasIncompleteUpdate, INCOMPLETE_UPDATE_MESSAGE } from './installation-state.js';
-import { RuntimeManager } from './runtime.js';
-import { prepareProtonRunner, syncPrefixUserLocale, syncUnrealCultureGameIni } from './proton.js';
+import { RuntimeManager, type RuntimeSettingsReservation } from './runtime.js';
+import { prepareProtonRunner, protonLaunchFeatureNotices, protonOptionalComponentNotices, syncPrefixUserLocale, syncUnrealCultureGameIni } from './proton.js';
 import { layoutOfWine } from './proton-layout.js';
 import { accountCacheKey } from './offline-identity.js';
 import { applyOfflinePermissions, assertOfflineAccessReady, bindOfflineAccess, licenseCacheDirectory, offlineAccessRevoked, revokeOfflineAccess, type OfflineRevocation } from './offline-access.js';
 import { CatalogService } from './catalog.js';
+import {readXboxProfileGames} from './xbox-profile-games.js';
+import {catalogDetailMarket, publicStoreMarket} from './public-store-market.js';
+import {assertStoreBundleAccess,assertStoreOfferAccess} from './catalog-access.js';
+import {requestedProductIds,scopedStoreAccess} from './store-bundle-access.js';
 import { cloudSaveRuntime, gameInviteRuntime, offlineIdentityRuntime, selectedWinePath, startXodusService, storeContentRuntime, storeDiscoveryRuntime, unbridgedCloudSaveRuntime, type XodusServiceSession } from './xodus-service.js';
 import { GameLogReducer, gameLoggingEnvironment, gameWindowEnvironment } from './game-log.js';
-import { downloadVerifiedVcRedist, installedVcRuntimeVersion, VC_REDIST_VERSION, versionAtLeast } from './vc-runtime.js';
+import { downloadVerifiedVcRedist, installedVcRuntimeVersion, VC_REDIST_VERSION, vcOperationEnvironment, versionAtLeast } from './vc-runtime.js';
 import { assertGameRemovalAvailable, validateGameDeleteTarget } from './game-removal.js';
 import { deleteGameDirectory } from './game-delete.js';
 import { spawnGameProcess, type GameProcess } from './game-process.js';
 import { gameLocaleEnvironment, installedGameLocales, installedGameTitleId, supportedGameLocale } from './game-locale.js';
 import { antiCheatEnvironment } from './anti-cheat.js';
-import { gameLaunchArguments, preparedGameWine } from './game-launch.js';
+import { gameLaunchArguments, launchEnvironmentForRuntime, preparedGameWine } from './game-launch.js';
+import { parseLaunchOptions } from '../shared/launch-tools.js';
 import { ConnectivityMonitor } from './connectivity.js';
 import { prepareGameWrapper, type GameWrapper } from './game-wrapper.js';
 import { normalizeLaunchTools } from '../shared/launch-tools.js';
@@ -57,11 +77,16 @@ import { InstallQueue, assertActivityCompatible, assertInstallDestination, canon
 import { GameDisplayBlocker } from './game-display.js';
 import { GameShortcuts, shortcutArguments, shortcutInstanceData, shortcutInstanceRequest, shortcutLauncherPath, type ShortcutDestination } from './game-shortcuts.js';
 import { ShortcutLaunch } from './shortcut-launch.js';
+import { acceptSteamHandoff, captureSteamLaunchEnvironment, gameSteamContext, offerSteamHandoff, steamGameEnvironment, steamHandoffRequest,
+  steamOverlayFiltered, steamOverlayLibraries, type SteamGameContext, type SteamHandoff, type SteamLaunchEnvironment, type SteamLaunchLease } from './steam-launch-context.js';
 import { loadShortcutIcon } from './shortcut-icon.js';
 import { AccountProfile } from './account-profile.js';
+import { enableSavedAccounts, forgetSavedAccount, listSavedAccounts, useSavedAccount, validAccountName } from './saved-accounts.js';
 import { AccountRefresh, readAccount } from './account-refresh.js';
 import { AccountLibrary } from './account-library.js';
 import { RecentPcGamePass } from './gamepass-recent.js';
+import { HomeGamePassShelf } from './home-gamepass.js';
+import { newInstallationTime } from './install-time.js';
 import { GameActivities, installedTitleId } from './game-activity.js';
 import {gameDetailsTarget} from './game-details-target.js';
 import { GameAchievementsReader } from './game-achievements.js';
@@ -74,11 +99,12 @@ import { fallbackAuthViewFactory } from './auth-fallback.js';
 import { contentParentForChoice, InstallPlans, installSelection, readInstallPlan } from './install-plan.js';
 import { availableInstallBytes } from './install-storage.js';
 import { adoptLauncherFonts } from './launcher-fonts.js';
-import { externalLauncherEnvironment } from './launcher-environment.js';
+import {externalLauncherEnvironment, nativeDialogsAvailable} from './launcher-environment.js';
 import { openDesktopTarget } from './desktop-open.js';
 import { addSteamShortcut, steamAccounts, steamRunning } from './steam-shortcuts.js';
 import { gameSteamPortrait, nexusSteamArtwork } from './steam-artwork.js';
 import { addLiveSteamShortcut } from './steam-live.js';
+import { CloudSaveDiagnostics, warnShortcutCloudFailure } from './cloud-save-diagnostics.js';
 import { DownloadCompletionNotifications } from './download-notifications.js';
 import { KeyringSupport } from './keyring.js';
 import { XboxSocialSessions } from './xbox-social.js';
@@ -139,8 +165,8 @@ let gameGuide:XboxGameGuide;
 let overlayShortcut:XboxOverlayShortcut|undefined;
 const nativeSocialSnapshots:(()=>void)[]=[];
 function nativeSocialConnection(){
- const status=backend?.current;
- return !demoMode&&!authState.running&&authState.stored===true&&authState.username&&status?.available&&status.binaryPath&&status.capabilities.nativeSocial?{account:authState.username,binary:status.binaryPath}:undefined;
+ const status=backend?.current,account=authState.player??(authState.stored===true?authState.username:undefined);
+ return !demoMode&&!authState.running&&account&&status?.available&&status.binaryPath&&status.capabilities.nativeSocial?{account,binary:status.binaryPath}:undefined;
 }
 function resetNativeSocial(){for(const reset of nativeSocialResets)reset();xboxNativeSocial?.clear();resetSocialTransport();}
 let nativeSocialBackend:string|undefined;
@@ -161,6 +187,10 @@ let runtime: RuntimeManager;
 let connectivity: ConnectivityMonitor | undefined;
 const operations = new Map<string, ChildProcessWithoutNullStreams>();
 const gameProcesses = new Map<string, GameProcess>();
+const gameFinalizations = new Map<string, Promise<void>>();
+const steamLeases = new Set<SteamLaunchLease>();
+let steamLauncherSession: { environment: SteamLaunchEnvironment; overlayFiltered: boolean; lease: SteamLaunchLease } | undefined;
+interface LaunchRequest { gameId?: string; steam?: SteamHandoff }
 const cancelledDownloads = new Set<string>();
 const downloadCancellations = new Map<string, Promise<void>>();
 let downloadCleanup: DownloadCleanup;
@@ -186,15 +216,36 @@ const catalog = new CatalogService();
 const gameActivities = new GameActivities();
 const gameAchievements = new GameAchievementsReader();
 const recentPcGamePass = new RecentPcGamePass();
+const homeGamePassShelf = new HomeGamePassShelf(recentPcGamePass, catalog);
 const accountLibrary = new AccountLibrary((ids, market) => catalog.licensedProducts(ids, market), undefined, market => recentPcGamePass.get(market));
+/** The longest a launch waits for owned bundles (a library read takes about 2 s) before its DLC hints. */
+const OWNED_ACCESS_WAIT_MS = 2_500;
 const installPlans = new InstallPlans(readInstallPlan);
 const demoMode = process.env.XODUS_DEMO === '1';
+const steamKeyboard=new SteamKeyboard();
+const launcherTray=new LauncherTray(()=>{
+  const image=nativeImage.createFromPath(fileURLToPath(new URL('../../assets/icon.png',import.meta.url)));
+  if(image.isEmpty())throw Error('Tray icon unavailable.');
+  const tray=new Tray(image);
+  const open=async(page?:'home'|'library'|'store'|'settings')=>{await showLauncher();if(page)mainWindow?.webContents.send('launcher-page',page);};
+  const navigate=(page:'home'|'library'|'store'|'settings')=>()=>{void open(page).catch(()=>console.error('Could not restore Nexus.'));};
+  try{
+    tray.setToolTip(launcherDisplayName);tray.on('click',navigate('home'));
+    tray.setContextMenu(Menu.buildFromTemplate([
+      {label:nativeText('Home'),click:navigate('home')},{label:nativeText('My Library'),click:navigate('library')},
+      {label:nativeText('Store'),click:navigate('store')},{label:nativeText('Settings'),click:navigate('settings')},
+      {type:'separator'},{label:nativeText('Quit'),click:()=>app.quit()},
+    ]));return tray;
+  }catch(error){tray.destroy();throw error;}
+},()=>desktopTrayAvailable());
+
 const walletUnlocker = new WalletUnlocker();
 const xboxSocial = new XboxSocialSessions(() => {
   const status = backend?.current;
-  return !shutdownStarted && !authState.running && authState.stored === true && authState.username
+  const account = authState.player ?? (authState.stored === true ? authState.username : undefined);
+  return !shutdownStarted && !authState.running && account
     && status?.available && status.binaryPath && status.capabilities.commands.includes('social')
-    ? { account: authState.username, binary: status.binaryPath } : undefined;
+    ? { account, binary: status.binaryPath } : undefined;
 });
 const keyringSupport = new KeyringSupport(process.env, undefined, process.platform, undefined, {
   diagnostic: value => backendDiagnostic({ operation: 'keyring', event: 'diagnostic', keyring: value, elapsedMs: value.elapsedMs }),
@@ -216,6 +267,8 @@ const keyringSupport = new KeyringSupport(process.env, undefined, process.platfo
 });
 const demoArtwork = new Map<string, DemoArtwork>();
 let launcherUpdater: LauncherUpdater;
+let componentUpdates: ComponentUpdates | undefined;
+const componentUpdateAdmission = new ComponentUpdateAdmission(() => ensureActivityIdle());
 const gameUpdates: Record<string, GameUpdate> = {};
 let checkingGameUpdates = false;
 let gameUpdateController: AbortController | undefined;
@@ -223,6 +276,9 @@ let gameUpdateJob: Promise<void> | undefined;
 let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
 let shortcuts: GameShortcuts;
 let accountProfile: AccountProfile;
+let licenseProfile: AccountProfile | undefined;
+let savedAccounts: string[] = [];
+let savedAccountsEnabled: boolean | undefined;
 let preparingLaunch = false;
 let preparingInstall = false;
 let preparingContent = false;
@@ -230,14 +286,14 @@ let finalizingGame = false;
 let shortcutOnly = false;
 let launchReady = false;
 let windowOpening: Promise<void> | undefined;
-const pendingRequests: (string | undefined)[] = [];
+const pendingRequests: LaunchRequest[] = [];
 const pendingShortcutErrors: unknown[] = [];
 let startupRequest: ReturnType<typeof shortcutArguments> = {};
 let startupError: Error | undefined;
 try {
   startupRequest = shortcutArguments(process.argv.slice(1));
-  if (startupRequest.profile) app.setPath('userData', startupRequest.profile);
-} catch (error) { startupError = error as Error; }
+  preserveLauncherIdentity(app,startupRequest.profile);
+} catch (error) { startupError = error as Error; preserveLauncherIdentity(app); }
 if (process.platform === 'linux') {
   try {
     const fonts = adoptLauncherFonts();
@@ -245,18 +301,35 @@ if (process.platform === 'linux') {
   } catch (error) { console.warn('Launcher fallback font unavailable:', (error as Error).message); }
 }
 // Electron's lock is scoped to userData, so independent profiles stay isolated.
-const primaryInstance = demoMode || app.requestSingleInstanceLock(shortcutInstanceData(startupRequest, Boolean(startupError)));
-if (!primaryInstance) app.quit();
-else if (!demoMode) app.on('second-instance', (_event, _argv, _workingDirectory, additionalData) => {
-  try { receiveLaunchRequest(shortcutInstanceRequest(additionalData, app.getPath('userData')).gameId); }
+let steamOffer: ReturnType<typeof offerSteamHandoff> | undefined;
+// This process itself was started by Steam. The packaged wrapper removed the
+// overlay before Electron started; only that fact is kept, never a path.
+let primarySteam: SteamLaunchEnvironment | undefined;
+let primaryOverlayFiltered = false;
+try {
+  const environment = !demoMode && !startupError ? captureSteamLaunchEnvironment(process.env) : undefined;
+  if (environment) primarySteam = environment;
+  if (environment) steamOffer = offerSteamHandoff(environment, () => app.quit(),
+    undefined, steamOverlayFiltered(process.env));
+} catch (error) { startupError = error as Error; }
+const primaryInstance = demoMode || app.requestSingleInstanceLock({ ...shortcutInstanceData(startupRequest, Boolean(startupError)),
+  ...(steamOffer ? { nexusSteam: steamOffer.handoff } : {}) });
+// The primary may use its bootstrap marker only together with its validated
+// Steam startup identity. Contextual requests still take precedence per game.
+if (primaryInstance && primarySteam) primaryOverlayFiltered = steamOverlayFiltered(process.env);
+if (primaryInstance) steamOffer?.close();
+if (!primaryInstance && !steamOffer) app.quit();
+else if (primaryInstance && !demoMode) app.on('second-instance', (_event, _argv, _workingDirectory, additionalData) => {
+  try { receiveLaunchRequest({ gameId: shortcutInstanceRequest(additionalData, app.getPath('userData')).gameId,
+    steam: steamHandoffRequest(additionalData) }); }
   catch (error) {
     if (launchReady) void shortcutError(error);
     else pendingShortcutErrors.push(error);
   }
 });
-const shortcutLaunch = new ShortcutLaunch(
+const shortcutLaunch = new ShortcutLaunch<SteamGameContext>(
   () => gameOperation?.kind === 'launch' && ['preparing', 'running', 'stopping'].includes(gameOperation.status) ? gameOperation.gameId : undefined,
-  (id) => launchGame(id),
+  (id, context) => launchGame(id, context),
 );
 
 async function showLauncher(): Promise<void> {
@@ -277,10 +350,37 @@ function finishShortcutSession(): void {
   // Account service and game-process cleanup must finish before normal quit.
   if (launchReady && (shortcutOnly || !mainWindow || mainWindow.isDestroyed()) && !nativeSocialKeepAlive.some(active=>active()) && !shortcutLaunch.preparing && !preparingLaunch && !finalizingGame && downloadCancellations.size === 0 && installQueue.size === 0 && operations.size === 0 && serviceSessions.size === 0) app.quit();
 }
-function receiveLaunchRequest(id?: string): void {
-  if (!launchReady) { pendingRequests.push(id); return; }
-  if (!id) { void showLauncher(); return; }
-  void shortcutLaunch.request(id).catch(shortcutError).finally(finishShortcutSession);
+function receiveLaunchRequest(request: LaunchRequest): void {
+  if (!launchReady) { pendingRequests.push(request); return; }
+  void handleLaunchRequest(request).catch(shortcutError).finally(finishShortcutSession);
+}
+async function handleLaunchRequest({ gameId, steam }: LaunchRequest): Promise<void> {
+  let lease: SteamLaunchLease | undefined;
+  try {
+    if (steam) { lease = await acceptSteamHandoff(steam); steamLeases.add(lease); }
+    if (!gameId) {
+      await showLauncher();
+      if (lease && steam) {
+        lease.signal.throwIfAborted();
+        // Opening another alias must not detach or stop an existing session.
+        if (steamLauncherSession && !steamLauncherSession.lease.signal.aborted) return;
+        const session = { environment: steam.environment, overlayFiltered: steam.overlayFiltered === true, lease };
+        steamLauncherSession = session;
+        const owned = lease;
+        owned.signal.addEventListener('abort', () => {
+          steamLeases.delete(owned);
+          if (steamLauncherSession === session) steamLauncherSession = undefined;
+        }, { once: true });
+        lease = undefined; // Launcher lifetime, released on shutdown or Steam Stop.
+      }
+      return;
+    }
+    await shortcutLaunch.request(gameId, steam && lease ? { environment: steam.environment,
+      overlayFiltered: steam.overlayFiltered === true, signal: lease.signal } : undefined);
+    // Preparation returning is not game exit. Steam must keep its tracked
+    // secondary alive through account-service and process cleanup too.
+    if (lease) await gameFinalizations.get(gameId);
+  } finally { if (lease) { steamLeases.delete(lease); lease.close(); } }
 }
 
 function snapshot(): AppSnapshot {
@@ -294,8 +394,9 @@ function snapshot(): AppSnapshot {
     downloads: structuredClone(store.downloads.map(task => downloadCancellations.has(task.id)
       ? { ...task, cancelling: true, canPause: false, phase: 'Cancelling download and checking files…' } : task)),
     settings: structuredClone(store.settings),
-    auth: structuredClone({ ...authState, gamertag: accountProfile?.value?.gamertag, avatarDataUrl: accountProfile?.value?.avatarDataUrl, subscription: accountProfile?.value?.subscription }),
+    auth: structuredClone({ ...authState, gamertag: accountProfile?.value?.gamertag, avatarDataUrl: accountProfile?.value?.avatarDataUrl, saved: savedAccounts, savedAccountsEnabled, licenseAvatarDataUrl: authState.player ? licenseProfile?.value?.avatarDataUrl : undefined, subscription: (authState.player ? licenseProfile : accountProfile)?.value?.subscription }),
     launcherUpdate: structuredClone(launcherUpdater.state),
+    componentUpdates: componentUpdates?.current,
     gameUpdates: structuredClone(gameUpdates),
     overlayShortcut:overlayShortcut?.current,
     downloadProgressSupported: Boolean(backend.current.capabilities.streamingProgressJson),
@@ -321,34 +422,55 @@ async function checkLauncherUpdate(): Promise<void> {
   await launcherUpdater.check();
 }
 
+async function stopGameUpdateCheck(): Promise<void> {
+  gameUpdateController?.abort();
+  await gameUpdateJob?.catch(() => {});
+}
+
 async function checkGameUpdates(id?: string): Promise<void> {
   ensureIdle();
   if (authState.stored !== true) throw new Error('Sign in before checking game updates.');
   const binary = requireBackend('account');
   const games = id ? store.games.filter(game => game.id === id) : [...store.games];
   if (id && !games.length) throw new Error('Game not found.');
-  let session: XodusServiceSession | undefined;
-  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-updates-'));
+  const previous = new Map(games.map(game => [game.id, gameUpdates[game.id]]));
+  const controller = new AbortController();
   checkingGameUpdates = true;
-  gameUpdateController = new AbortController();
+  gameUpdateController = controller;
+  let session: XodusServiceSession | undefined;
+  let temporary: string | undefined;
   try {
-    for (const game of games) gameUpdates[game.id] = { checking: true };
+    for (const game of games) gameUpdates[game.id] = { ...gameUpdates[game.id], checking: true };
     emitSnapshot();
-    session = await startXodusService(binary, temporary, () => {}, gameUpdateController.signal);
+    temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-updates-'));
+    if (controller.signal.aborted) return;
+    session = await startXodusService(binary, temporary, () => {}, controller.signal);
     for (const game of games) {
-      if (gameUpdateController.signal.aborted) throw new Error('Update check cancelled.');
+      if (controller.signal.aborted) break;
       try {
         const inspected = await inspectGameDirectory(game.path);
+        if (controller.signal.aborted) break;
         if (!inspected.storeId || !inspected.installedVersion) throw new Error('This manifest has no Store ID or installed package version.');
-        gameUpdates[game.id] = await queryGameUpdate(session.socketPath, inspected.storeId, inspected.installedVersion, gameUpdateController.signal);
-      } catch (error) { gameUpdates[game.id] = { checking: false, checkedAt: new Date().toISOString(), error: (error as Error).message }; }
+        gameUpdates[game.id] = await queryGameUpdate(session.socketPath, inspected.storeId, inspected.installedVersion, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) break;
+        gameUpdates[game.id] = { checking: false, checkedAt: new Date().toISOString(), error: (error as Error).message };
+      }
       emitSnapshot();
     }
   } catch (error) {
-    for (const game of games) if (gameUpdates[game.id]?.checking) gameUpdates[game.id] = { checking: false, error: (error as Error).message };
-    throw error;
+    if (!controller.signal.aborted) {
+      for (const game of games) if (gameUpdates[game.id]?.checking) gameUpdates[game.id] = { checking: false, error: (error as Error).message };
+      throw error;
+    }
   } finally {
-    await session?.stop().catch(() => {}); await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
+    // Preserve completed results and restore previous availability for cancelled requests.
+    for (const game of games) if (gameUpdates[game.id]?.checking) {
+      const value = previous.get(game.id);
+      if (value) gameUpdates[game.id] = value; else delete gameUpdates[game.id];
+    }
+    await session?.stop().catch(() => {});
+    if (temporary) await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
     checkingGameUpdates = false; gameUpdateController = undefined; emitSnapshot();
   }
 }
@@ -377,28 +499,98 @@ function emitLog(scope: string, line: string): void {
 
 function requireBackend(command: keyof typeof backend.current.capabilities): string {
   const status = backend.current;
-  if (!status.available || !status.binaryPath) throw new Error('The Xodus backend is unavailable.');
+  if (!status.available || !status.binaryPath) throw new Error('The Nexus backend is unavailable.');
   if (typeof status.capabilities[command] === 'boolean' && !status.capabilities[command]) {
-    throw new Error(`The active Xodus backend does not support the ${String(command)} command.`);
+    throw new Error(`The active Nexus backend does not support the ${String(command)} command.`);
   }
   return status.binaryPath;
 }
 
-function ensureIdle(mode?: 'install' | 'launch' | 'remove'): void {
-  if (offlinePermissionChanging) throw Error('Wait for the offline-permission change to finish.');
-  if (keyringSupport.busy) throw Error('Wait for the wallet operation to finish.');
-  if (authState.running) throw Error('A sign-in operation is already in progress.');
-  if (shutdownStarted) throw Error('The launcher is closing.');
-  if (downloadCancellations.size) throw Error('A download is being cancelled. Wait for its cleanup to finish.');
-  if (preparingInstall || preparingContent) throw new Error('An installation is being prepared.');
-  if (preparingLaunch) throw new Error('A game launch is already being prepared.');
-  if (finalizingGame) throw new Error('The previous game is still finishing cleanup.');
-  if (launcherUpdater?.state.updating) throw new Error('The launcher is being updated.');
-  if (checkingGameUpdates) throw new Error('A game update check is in progress.');
-  if (gameRemovalInProgress) throw new Error('A game is being removed. Wait for it to finish.');
-  assertActivityCompatible(operations.keys(), store.downloads, gameOperation, installQueue.size, mode);
-  if (backend.current.updating) throw new Error('The backend is being updated.');
-  if (runtime.current.updating) throw new Error('Xodus Runtime is being installed.');
+function ensureIdle(mode?: 'install' | 'launch' | 'remove', ownRuntimeReservation?: RuntimeSettingsReservation, owner?: ComponentUpdateOwner, profileSettingOnly = false): void {
+    componentUpdateAdmission.assertAllowed(owner);
+    ensureActivityIdle(mode, ownRuntimeReservation, profileSettingOnly);
+}
+
+function ensureActivityIdle(mode?: 'install' | 'launch' | 'remove', ownRuntimeReservation?: RuntimeSettingsReservation, profileSettingOnly = false): void {
+    if (ownRuntimeReservation)
+        runtime.assertSettingsReservation(ownRuntimeReservation);
+    if (offlinePermissionChanging)
+        throw Error('Wait for the offline-permission change to finish.');
+    if (keyringSupport.busy)
+        throw Error('Wait for the wallet operation to finish.');
+    if (authState.running || authJob)
+        throw Error('A sign-in operation is already in progress.');
+    if (shutdownStarted)
+        throw Error('The launcher is closing.');
+    if (downloadCancellations.size)
+        throw Error('A download is being cancelled. Wait for its cleanup to finish.');
+    if (preparingInstall || preparingContent)
+        throw new Error('An installation is being prepared.');
+    if (preparingLaunch)
+        throw new Error('A game launch is already being prepared.');
+    if (finalizingGame)
+        throw new Error('The previous game is still finishing cleanup.');
+    if (launcherUpdater?.busy)
+        throw new Error('The launcher is being updated.');
+    if (checkingGameUpdates)
+        throw new Error('A game update check is in progress.');
+    if (gameRemovalInProgress)
+        throw new Error('A game is being removed. Wait for it to finish.');
+    // A per-game runtime-family change is settings-only: it verifies and
+    // persists the game record; it does not mutate a runtime payload, prefix or
+    // global pointer. Allow it during downloads/updates, but never while a game
+    // is preparing, running, stopping or finalizing its launch/save/session.
+    if (profileSettingOnly && gameOperation && ['preparing', 'running', 'stopping'].includes(gameOperation.status))
+        throw new Error('Close this game before changing its runtime.');
+    // 'launch' is the narrow profile-setting mode: it permits queue work and only
+    // operations whose IDs are known downloads, while rejecting any unknown
+    // operation and any active game. Normal callers retain their original mode.
+    assertActivityCompatible(operations.keys(), store.downloads,
+        profileSettingOnly ? undefined : gameOperation,
+        profileSettingOnly ? 0 : installQueue.size,
+        profileSettingOnly ? 'launch' : mode);
+    if (backend.current.updating)
+        throw new Error('The backend is being updated.');
+    if ((runtime.current.updating || runtime.busy) && !ownRuntimeReservation)
+        throw new Error('Nexus Runtime is being installed.');
+}
+
+function componentActivityRunning(): boolean {
+    return offlinePermissionChanging || keyringSupport.busy || authState.running || Boolean(authJob) || shutdownStarted ||
+        downloadCancellations.size > 0 || preparingInstall || preparingContent || preparingLaunch || finalizingGame ||
+        checkingGameUpdates || gameRemovalInProgress || operations.size > 0 || installQueue.size > 0 || Boolean(gameOperation && ['preparing', 'running', 'stopping'].includes(gameOperation.status)) ||
+        store.downloads.some(task => task.status === 'queued' || task.status === 'running');
+}
+
+async function discoverComponent<T>(component: 'backend' | 'runtime' | 'launcher', prepare: () => Promise<T>): Promise<T> {
+    try { return await prepare(); }
+    catch (error) {
+        // Read-only plan discovery failed before any installer entry point. Record
+        // the phase and component once, then let the original error reach the UI.
+        backendDiagnostic({ operation: 'component-update', event: 'failure', stage: 'plan-discovery', component, status: backendHttpStatus(error) });
+        throw error;
+    }
+}
+
+async function prepareComponentUpdates(): Promise<PreparedComponentUpdate[]> {
+    const backendPlan = await discoverComponent('backend', () => backend.prepareComponentUpdate(emitSnapshot));
+    const backendApply = backendPlan.apply, backendReconcile = backendPlan.reconcile;
+    backendPlan.apply = async (owner) => {
+        const result = await backendApply(owner);
+        try {
+            await refreshAccount(false);
+            emitSnapshot();
+        }
+        catch (error) {
+            throw Object.assign(new Error('Backend activated, but refreshing the account failed.', { cause: error }), { committed: result.committed });
+        }
+        return result;
+    };
+    if (backendReconcile)
+        backendPlan.reconcile = async (owner) => { const result = await backendReconcile(owner); await refreshAccount(false); emitSnapshot(); return result; };
+    return [backendPlan,
+        ...await discoverComponent('runtime', () => prepareManagedComponentUpdates(runtime, emitSnapshot)),
+        await discoverComponent('launcher', () => launcherUpdater.prepareComponentUpdate())];
 }
 
 async function syncManagedWinePath(): Promise<void> {
@@ -416,9 +608,9 @@ async function refreshAccount(emit = true, afterAuth = false): Promise<AuthStatu
   const status = backend.current;
   const key = accountRefreshKey();
   await accountRefresh.run(key, async signal => {
-    let next: Pick<AuthStatus, 'stored' | 'username' | 'note'>;
+    let next: Pick<AuthStatus, 'stored' | 'username' | 'player' | 'note'>;
     if (!status.available || !status.binaryPath) {
-      next = { stored: null, username: undefined, note: 'Account status is unavailable because the Xodus backend is offline.' };
+      next = { stored: null, username: undefined, note: 'Account status is unavailable because the Nexus backend is offline.' };
     } else if (!status.capabilities.account) {
       next = {
         stored: null,
@@ -434,17 +626,19 @@ async function refreshAccount(emit = true, afterAuth = false): Promise<AuthStatu
       } else {
         try {
           const line = result.output.split('\n').map((entry) => entry.trim()).reverse().find((entry) => entry.startsWith('{'));
-          const account = JSON.parse(line ?? '') as { stored?: unknown; username?: unknown };
-          if (account.stored === true && typeof account.username === 'string' && account.username.trim()) {
+          const account = JSON.parse(line ?? '') as { stored?: unknown; username?: unknown; player?: { username?: unknown } | null };
+          const player = status.capabilities.playerAccount && validAccountName(account.player?.username) ? account.player!.username!.trim() : '';
+          if (account.stored === true && validAccountName(account.username)) {
             next = {
               stored: true,
               username: account.username.trim(),
+              player: player || undefined,
               note: runtime?.current.name?.includes('-xgamesave-pr28-')
                 ? 'Credentials are stored by Xodus. The experimental PR #28 runtime can try in-game Xbox sign-in and two-way cloud save sync; this account status alone does not verify either.'
-                : 'Credentials are stored by Xodus in the system keychain. This does not mean in-game Xbox platform sign-in is implemented.',
+                : 'Credentials are stored by Xodus in the system keychain.',
             };
           } else if (account.stored === false) {
-            next = { stored: false, username: undefined, note: 'No Microsoft account is stored by Xodus.' };
+            next = { stored: false, username: undefined, player: player || undefined, note: 'No Microsoft Store account is stored by Xodus.' };
           } else {
             throw new Error('unexpected account response');
           }
@@ -455,17 +649,25 @@ async function refreshAccount(emit = true, afterAuth = false): Promise<AuthStatu
     }
     return next;
   }, async next => {
-    if (authState.username !== next.username || next.stored !== true) xboxSocial.close();
-    if(next.username!==authState.username||next.stored!==true)resetNativeSocial();
-    authState = { ...authState, ...next };
+    if (authState.username !== next.username || authState.player !== next.player || next.stored !== true) xboxSocial.close();
+    if(next.username!==authState.username||next.player!==authState.player||next.stored!==true)resetNativeSocial();
+    // An error result carries no player, so a stale one must never survive it.
+    authState = { ...authState, player: undefined, ...next };
+    const selectedAuth = authState;
     accountLibrary.select(authState.stored === true ? authState.username : undefined,
       status.capabilities.library ? status.binaryPath : undefined, currentMarket());
-    gameActivities.select(authState.stored === true ? authState.username : undefined,
+    gameActivities.select(authState.player ?? (authState.stored === true ? authState.username : undefined),
       status.capabilities.gameActivity ? status.binaryPath : undefined);
-    gameAchievements.select(authState.stored === true ? authState.username : undefined,
+    gameAchievements.select(authState.player ?? (authState.stored === true ? authState.username : undefined),
       status.capabilities.achievements ? status.binaryPath : undefined);
-    await accountProfile?.select(authState.stored === true ? authState.username : undefined,
+    await accountProfile?.select(authState.player ?? (authState.stored === true ? authState.username : undefined),
       status.capabilities.profile ? status.binaryPath : undefined, emit);
+    const saved = status.capabilities.savedAccounts && status.binaryPath ? await listSavedAccounts(status.binaryPath).catch(() => null) : null;
+    if (authState !== selectedAuth) return;
+    savedAccounts = saved?.accounts ?? [];
+    savedAccountsEnabled = saved?.enabled;
+    await licenseProfile?.select(authState.stored === true && authState.player ? authState.username : undefined,
+      status.capabilities.licenseProfile ? status.binaryPath : undefined, emit);
   }, () => key === accountRefreshKey() && (!authState.running || afterAuth));
   if (emit) emitSnapshot();
   return structuredClone(authState);
@@ -535,9 +737,22 @@ async function offlineLicenseCache(root = offlineDataRoot()): Promise<string | u
 }
 let designationCheck: Promise<void> | undefined;
 let offlinePermissionChanging = false;
+/** Global device-designation capability, not default-game readiness. A verified
+ * managed family can legitimately back explicit per-game choices, so probe an
+ * unconfigured installation without changing any game or default selection. */
 async function offlineLaunchSupported(): Promise<boolean> {
-  const wine = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
-  return Boolean(backend.current.capabilities.licenseCache && backend.current.capabilities.offlineLaunch && wine && await offlineIdentityRuntime(wine));
+  if (!backend.current.capabilities.licenseCache || !backend.current.capabilities.offlineLaunch) return false;
+  const selected = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
+  if (selected) return offlineIdentityRuntime(selected);
+  for (const id of ['nexus', 'nexus-cachyos'] as const) {
+    try {
+      const candidate = await resolveRuntimeFamily(store.settings.runtimeRoot, id);
+      if (await offlineIdentityRuntime(candidate.winePath)) return true;
+    } catch {
+      // A missing or corrupt family never authorizes this capability.
+    }
+  }
+  return false;
 }
 function assertOfflineScope(account: string | undefined, binary: string, root: string): void {
   if (shutdownStarted || authState.running || authState.stored !== true || !account || authState.username !== account || backend.current.binaryPath !== binary || offlineDataRoot() !== root)
@@ -564,11 +779,12 @@ function verifyOfflineDesignation(): void {
     .finally(() => { designationCheck = undefined; });
 }
 
-async function runAuth(command: 'login' | 'logout'): Promise<void> {
+async function runAuth(command: 'login' | 'logout', player = false): Promise<void> {
   ensureIdle();
   for(const prepare of nativeSocialBeforeAuth)await prepare();
   resetNativeSocial();
   const binary = requireBackend(command);
+  if (player && !backend.current.capabilities.playerAccount) throw Error('Update the Nexus backend in Settings before using a separate player account.');
   const id = `auth-${randomUUID()}`;
   accountRefresh.invalidate();
   accountLibrary.reset();
@@ -585,40 +801,114 @@ async function runAuth(command: 'login' | 'logout'): Promise<void> {
     const view = fallbackAuthViewFactory(request => authViewFactory(mainWindow ?? undefined, undefined, request, nativeText), () => browserAuthViewFactory());
     if (shutdownStarted) throw Error('The launcher is closing.');
     await accountProfile.select(undefined);
+    await licenseProfile?.select(undefined);
     if (shutdownStarted) throw Error('The launcher is closing.');
-    const tracked = command === 'login' ? startAuthTransport(binary, view)
+    const tracked = command === 'login' ? (player ? startAuthTransport(binary, view, process.env, undefined, true) : startAuthTransport(binary, view))
       // Explicit sign-out removes the local device registration too. Ordinary
       // sign-in must keep it, including when renewing an existing account.
-      : spawnTracked(binary, ['logout', '--device'], { onLine: (line) => emitLog('auth', line) });
+      // Signing out only the player account never touches the license account or the device.
+      : spawnTracked(binary, player ? ['logout', '--player'] : ['logout', '--device'], { onLine: (line) => emitLog('auth', line) });
     operations.set(id, tracked.child);
     const result = await tracked.result;
     accountRefresh.invalidate();
     // Another account signing in is caught before its first launch (bindOfflineAccess).
-    if (command === 'logout') await revokeOffline('sign-out');
-    if (result.code === 0) await refreshAccount(false, true);
+    if (command === 'logout' && !player) await revokeOffline('sign-out');
     authState = {
       ...authState,
-      running: false,
+      running: true,
       lastAction: command,
       lastResult: result.code === 0 ? 'success' : 'failed',
     };
     if (result.code !== 0) throw new Error(`xodus-cli ${command} exited with code ${result.code}.`);
   } finally {
     operations.delete(id);
-    authState.running = false;
-    emitSnapshot();
+    try { if (!shutdownStarted) await refreshAccount(false, true); }
+    finally { authState.running = false; emitSnapshot(); }
   }
 }
 
-function requestAuth(command: 'login' | 'logout'): Promise<void> {
+function requestAuth(command: 'login' | 'logout', player = false): Promise<void> {
   if (authJob) return Promise.reject(Error('A sign-in operation is already in progress.'));
-  const job = runAuth(command); authJob = job;
+  const job = player ? runAuth(command, true) : runAuth(command); authJob = job;
   const clear = () => { if (authJob === job) authJob = undefined; };
   void job.then(clear, clear); return job;
 }
 
+/** Reserve the auth job before any asynchronous preparation or credential mutation. */
+function requestSavedAccount(action: 'use' | 'forget' | 'enable', name: unknown, ownRuntimeReservation?: RuntimeSettingsReservation): Promise<void> {
+  ensureIdle(undefined, ownRuntimeReservation);
+  const binary = backend.current.binaryPath;
+  if (typeof name !== 'string' || !binary || !backend.current.capabilities.savedAccounts) return Promise.reject(Error('Saved accounts are not available.'));
+  if (action === 'forget' && authState.stored === null) return Promise.reject(Error('Refresh account status before forgetting a saved Store account.'));
+  const forgetActiveStore = action === 'forget' && name === authState.username;
+  const job = Promise.resolve().then(async () => {
+    authState = { ...authState, running: true };
+    accountRefresh.invalidate();
+    accountLibrary.reset();
+    gameActivities.select(); gameAchievements.select(); xboxSocial.close();
+    emitSnapshot();
+    try {
+      for (const prepare of nativeSocialBeforeAuth) await prepare();
+      resetNativeSocial();
+      await accountProfile.select(undefined);
+      await licenseProfile?.select(undefined);
+      if (shutdownStarted) throw Error('The launcher is closing.');
+      if (action === 'enable') await enableSavedAccounts(binary);
+      else if (action === 'use') await useSavedAccount(binary, name);
+      else await forgetSavedAccount(binary, name);
+    } finally {
+      accountRefresh.invalidate();
+      try {
+        try { if (forgetActiveStore) await revokeOffline('sign-out'); }
+        finally { if (!shutdownStarted) await refreshAccount(false, true); }
+      }
+      finally { authState.running = false; emitSnapshot(); }
+    }
+  });
+  authJob = job;
+  const clear = () => { if (authJob === job) authJob = undefined; };
+  void job.then(clear, clear);
+  return job;
+}
+
+/** Live account/backend/market identity; compared after every awaited proof. */
+function storeAccessContext(){return {account:authState.username,backend:backend.current.binaryPath,market:currentMarket()};}
+function assertStoreAccessContext(context:{account?:string;backend?:string;market:string}) {
+  if(authState.running||authState.stored!==true||context.account!==authState.username||context.backend!==backend.current.binaryPath||context.market!==currentMarket())
+    throw Error('Store account changed. Refresh account access.');
+}
+async function storeAccess(requested?:string[]) {
+  if(authState.running||authState.stored!==true||!authState.username)throw Error('Sign in before checking Store access.');
+  const account=authState.username,binary=backend.current.binaryPath,market=currentMarket(),configuredMarket=store.settings.market;
+  accountLibrary.select(account,backend.current.capabilities.library?binary:undefined,market);
+  // Bundle membership is derived in the main process for exactly the requested
+  // products, from public metadata; it never adds ownership to the map. Owned
+  // sources are taken from the fresh snapshot passed to the callback (never a
+  // pre-load peek), and the whole graph read stays inside that snapshot.
+  const ids=requestedProductIds(requested);
+  const result=await accountLibrary.storeAccess(configuredMarket,
+    ids.length?(access,wanted)=>scopedStoreAccess(access,wanted,(scope,scopedMarket)=>catalog.bundleScope(scope,Object.keys(access.accessByProductId).filter(id=>access.accessByProductId[id]==='owned'),scopedMarket)):undefined,ids);
+  if(authState.running||authState.stored!==true||account!==authState.username||binary!==backend.current.binaryPath||market!==currentMarket()||configuredMarket!==store.settings.market)throw Error('Store account changed. Refresh account access.');
+  return result;
+}
+/** Direct verified Store access, or (for one exact game child of a currently
+ * OWNED bundle) eligibility for the genuine backend license check. Exact
+ * direct access is decided from current evidence alone, so an unavailable
+ * public catalog can never block an existing Store installation. The scoped
+ * read is the only metadata await and stays inside the account-library
+ * snapshot; the assertion context is read again after it. */
+async function verifyStoreInstall(productId:string) {
+  const context=storeAccessContext();
+  const access=await storeAccess([productId]);
+  if(['owned','gamepass'].includes(access.accessByProductId[productId]??''))assertStoreOfferAccess(access,productId,context);
+  else assertStoreBundleAccess(access,productId,context);
+  assertStoreAccessContext(context);
+}
+
 async function startInstall(request: InstallRequest, updateGame?: Game, resumed?: DownloadTask): Promise<string> {
-  ensureIdle(updateGame ? undefined : 'install');
+  await stopGameUpdateCheck();
+  ensureIdle('install');
+  if (updateGame && gameOperation?.gameId === updateGame.id && ['preparing', 'running', 'stopping'].includes(gameOperation.status)) throw Error('Close this game before updating its installed files.');
   preparingInstall = true;
   try { await prepareSystemWallet(); return await prepareInstall(request, updateGame, undefined, resumed); }
   finally { preparingInstall = false; }
@@ -636,8 +926,9 @@ async function gameContent(id: string) {
   if (authState.running || authState.stored !== true) throw Error('Sign in before checking game content.');
   const identity = `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`;
   accountLibrary.select(authState.username, backend.current.capabilities.library ? backend.current.binaryPath : undefined, currentMarket());
+  const selectedRuntime=await resolveGameRuntime({runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot),defaultWine:selectedWinePath(store.settings.winePath,store.settings.runtimeRoot,runtime.current.winePath),...gameRuntimeParameters(game)});
   const result = await contentManager().plan(game, () => accountLibrary.access(true), currentMarket());
-  const wine = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
+  const wine = selectedRuntime.winePath;
   result.plan.runtimeSupported = Boolean(wine && await storeContentRuntime(wine));
   if (authState.running || authState.stored !== true || identity !== `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`) throw Error('Account changed. Check content again.');
   return result;
@@ -670,10 +961,12 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
   const binary = requireBackend('streaming');
   if (updateGame && !backend.current.capabilities.streamingUpdateRecovery) throw Error('Update the Nexus backend in Settings before updating installed games safely.');
   const productId = safeProductId(request.productId);
+  if(request.source!==undefined&&request.source!=='store')throw Error('Invalid installation source.');
+  if(request.source==='store')await verifyStoreInstall(productId);
   const market = currentMarket();
   let selectedContentId: string | undefined;
   if (!content) {
-    if (!backend.current.capabilities.packageSelection) throw Error('Update the Xodus backend in Settings before installing games.');
+    if (!backend.current.capabilities.packageSelection) throw Error('Update the Nexus backend in Settings before installing games.');
     if (request.selectionMarket !== undefined && request.selectionMarket !== market) throw Error('Store market changed. Choose the installation package again.');
     if (request.selectedContentId !== undefined && request.selectionMarket !== market) throw Error('Invalid installation package selection.');
     const plan = await installPlans.get(binary, productId, market, Boolean(backend.current.capabilities.contentPackageSelection));
@@ -682,6 +975,7 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
     const choice = plan.choices.find(choice => choice.supported && choice.contentId === selectedContentId)!;
     if (updateGame && choice.kind === 'Durable') throw Error('An add-on cannot replace the base game. Use Manage content.');
     const parent = contentParentForChoice(choice, store.games);
+    if(parent&&request.source==='store')throw Error('Use Manage content in the installed Library game to install add-ons.');
     if (parent) return prepareContentInstall(parent, choice.productId, selectedContentId);
   }
   const activeTasks = store.downloads.filter(task => ['running', 'queued', 'paused'].includes(task.status));
@@ -695,7 +989,6 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
   if (updateGame) {
     const actual = await fs.realpath(destination);
     if (actual !== await fs.realpath(updateGame.path)) throw new Error('Update destination differs from the installed game.');
-    if (await backend.externalDownloadRunning()) throw new Error('Another Xodus download is running. Wait before updating this game.');
     const processes = await run('ps', ['-eo', 'args='], { maxOutput: 2_000_000 });
     if (processes.code !== 0) throw new Error('Could not verify that the game is closed. Update was not started.');
     const executable = updateGame.executable ? path.basename(updateGame.executable).toLowerCase() : '';
@@ -705,9 +998,11 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
         (command.includes(actual.toLowerCase()) || executable.length > 0 && command.includes(executable)));
     })) throw new Error('A game process is active. Close the game before updating files in place.');
   }
+  if(request.source==='store')await verifyStoreInstall(productId);
   const id = randomUUID();
   const task: DownloadTask = {
     id,
+    source: request.source,
     kind: content ? 'content' : updateGame ? 'update' : 'install',
     gameId: content?.game.id ?? updateGame?.id,
     title: request.title.trim() || productId,
@@ -728,6 +1023,9 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
   const isCancelled = () => task.status === 'cancelled';
   installQueue.enqueue({ id, run: async () => {
     if (shutdownStarted) throw Error('The launcher is closing.');
+    if (identity !== `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`) throw Error('Account, backend or Store market changed. Retry the installation.');
+    if(request.source==='store')await verifyStoreInstall(productId);
+    // Every awaited proof above must still belong to the captured queue identity.
     if (identity !== `${authState.username}:${backend.current.binaryPath}:${currentMarket()}`) throw Error('Account, backend or Store market changed. Retry the installation.');
     if (await backend.externalDownloadRunning()) throw Error('Another Xodus download is running outside this queue.');
     await assertInstallDestination(destination, store.games.filter(game => game.id !== updateGame?.id && game.id !== content?.game.id).map(game => game.path));
@@ -752,6 +1050,7 @@ async function prepareInstall(request: InstallRequest, updateGame?: Game, conten
 }
 
 async function runDownload(task: DownloadTask, binary: string, market: string, updateGame?: Game, content?: { game: Game; pkg: ContentPackage; manager: GameContent }): Promise<void> {
+  const installAccount = authState.stored === true ? authState.username : undefined;
   const { id, productId, destination, selectedContentId } = task;
   const structured = Boolean(backend.current.capabilities.streamingProgressJson);
   const controllable = structured && Boolean(backend.current.capabilities.streamingControls);
@@ -848,7 +1147,12 @@ async function runDownload(task: DownloadTask, binary: string, market: string, u
             delete gameUpdates[updateGame.id];
           }
         }
-        else await store.upsertGame({ ...inspected, offerProductId: /^[A-Z0-9]{12}$/.test(task.productId) ? task.productId : undefined });
+        else {
+          const installedAt = newInstallationTime(
+            store.games.find(entry => entry.id === inspected.id || entry.path === inspected.path),
+            task.status, inspected.installState, task.finishedAt);
+          await store.upsertGame({ ...inspected, ...(installedAt ? { installedAt } : {}), licenseAccount: installAccount, offerProductId: /^[A-Z0-9]{12}$/.test(task.productId) ? task.productId : undefined });
+        }
       } catch (error) {
         if (updateGame) await refreshIncompleteUpdate(updateGame).catch(() => {});
         if (updateGame && task.status === 'complete') {
@@ -896,6 +1200,7 @@ function cancellableDownload(id: string): DownloadTask {
 }
 
 function cancelDownload(id: string, mode: 'keep' | 'delete-files' = 'keep'): Promise<void> {
+  componentUpdateAdmission.assertAllowed();
   if (mode !== 'keep' && mode !== 'delete-files') return Promise.reject(Error('Invalid cancellation option.'));
   if (downloadCancellations.has(id)) return Promise.reject(Error('This download is already being cancelled.'));
   if (shutdownStarted || preparingInstall || preparingContent || gameRemovalInProgress) return Promise.reject(Error('Wait for the current operation to finish.'));
@@ -959,8 +1264,11 @@ async function importGame(input?: string): Promise<Game | null> {
 async function gameLaunchOptions(id: string): Promise<GameLaunchOptions> {
   const game = store.games.find((entry) => entry.id === id);
   if (!game) throw new Error('Game not found.');
-  const wine = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
-  if (!wine) return { cloudSaves: false, cloudReason: 'Select Xodus Runtime in Settings.', vcInstall: false, vcReason: 'Select Xodus Runtime in Settings.' };
+  let wine: string;
+  try {
+    wine=(await resolveGameRuntime({runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot),defaultWine:selectedWinePath(store.settings.winePath,store.settings.runtimeRoot,runtime.current.winePath),...gameRuntimeParameters(game)})).winePath;
+  } catch(error) { const reason=(error as Error).message;return {cloudSaves:false,cloudReason:reason,vcInstall:false,vcReason:reason}; }
+  if (!wine) return { cloudSaves: false, cloudReason: 'Select Nexus Runtime in Settings.', vcInstall: false, vcReason: 'Select Nexus Runtime in Settings.' };
   const wineAvailable = await fs.access(wine, constants.X_OK).then(() => true, () => false);
   if (!wineAvailable) return { cloudSaves: false, cloudReason: 'The selected Wine binary is unavailable.', vcInstall: false, vcReason: 'The selected Wine binary is unavailable.' };
   const protonRoot = path.resolve(path.dirname(wine), '..', '..');
@@ -973,7 +1281,7 @@ async function gameLaunchOptions(id: string): Promise<GameLaunchOptions> {
   const serviceAvailable = Boolean(servicePath) && await fs.access(servicePath, constants.X_OK).then(() => true, () => false);
   return {
     cloudSaves: previewRuntime && serviceAvailable,
-    cloudReason: !previewRuntime ? 'The selected Wine runtime does not include the cloud-save preview.' : !serviceAvailable ? 'This Xodus backend has no xodus-service.' : undefined,
+    cloudReason: !previewRuntime ? 'The selected Wine runtime does not include the cloud-save preview.' : !serviceAvailable ? 'This Nexus backend has no xodus-service.' : undefined,
     vcInstall: protonAvailable,
     vcReason: protonAvailable ? undefined : 'VC++ installation requires a full Proton runtime.',
   };
@@ -987,14 +1295,15 @@ async function gameTitleId(game: Game): Promise<string | undefined> {
   return installedGameTitleId(game.path);
 }
 
-async function launchGame(id: string): Promise<void> {
+async function launchGame(id: string, steam?: SteamGameContext): Promise<void> {
+  await stopGameUpdateCheck();
   ensureIdle('launch');
   preparingLaunch = true;
-  try { await prepareGameLaunch(id); }
+  try { await prepareGameLaunch(id, steam); }
   finally { preparingLaunch = false; }
 }
 
-async function prepareGameLaunch(id: string): Promise<void> {
+async function prepareGameLaunch(id: string, steam?: SteamGameContext): Promise<void> {
   const game = store.games.find((entry) => entry.id === id);
   if (!game) throw new Error('Game not found.');
   const target = await canonicalInstallPath(game.path);
@@ -1002,6 +1311,27 @@ async function prepareGameLaunch(id: string): Promise<void> {
     if (task.gameId === id || installPathsOverlap(target, await canonicalInstallPath(task.destination))) throw Error('Finish or cancel this game\'s installation before playing it.');
   }
   if (await refreshIncompleteUpdate(game)) { emitSnapshot(); throw Error(INCOMPLETE_UPDATE_MESSAGE); }
+  if (game.licenseAccount && game.licenseAccount !== authState.username
+      && savedAccounts.includes(game.licenseAccount) && backend.current.binaryPath && backend.current.capabilities.savedAccounts) {
+    // Changing Store credentials must not race a download using another account.
+    assertActivityCompatible(operations.keys(), store.downloads, gameOperation, installQueue.size);
+    // The game was installed with another saved Store account: use that one, no sign-in needed.
+    authState = { ...authState, running: true };
+    accountRefresh.invalidate();
+    emitSnapshot();
+    try {
+      for (const prepare of nativeSocialBeforeAuth) await prepare();
+      resetNativeSocial(); xboxSocial.close();
+      await accountProfile.select(undefined);
+      await licenseProfile?.select(undefined);
+      await useSavedAccount(backend.current.binaryPath, game.licenseAccount);
+    } finally {
+      accountRefresh.invalidate();
+      try { await refreshAccount(false, true); }
+      finally { authState.running = false; emitSnapshot(); }
+    }
+    if (authState.stored !== true || authState.username !== game.licenseAccount) throw Error('The saved Store account could not be activated. Sign in to it again.');
+  }
   const inspected = await inspectGameDirectory(game.path);
   await store.patchGame(id, {
     installState: inspected.installState,
@@ -1018,10 +1348,12 @@ async function prepareGameLaunch(id: string): Promise<void> {
   if (inspected.installState !== 'ready') throw new Error(inspected.installMessage ?? 'The installation is not ready for Xodus run.');
   const locale = supportedGameLocale(game.locale ?? '');
   const titleId = await gameTitleId(game).catch(() => undefined);
-  const wine = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
+  const runtimeContext = await resolveGameRuntime({runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot),defaultWine:selectedWinePath(store.settings.winePath,store.settings.runtimeRoot,runtime.current.winePath),...gameRuntimeParameters(game)});
+  const wine = runtimeContext.winePath;
+  await bindRuntimePrefix(runtimeContext);
   if (!wine) throw new Error('Select a Wine / Proton binary in Settings.');
   try { await fs.access(wine, constants.X_OK); }
-  catch { throw new Error(`The selected Wine runtime is unavailable: ${wine}. Select or reinstall Xodus Runtime in Settings.`); }
+  catch { throw new Error(`The selected Wine runtime is unavailable: ${wine}. Select or reinstall Nexus Runtime in Settings.`); }
   const cloudRuntime = await cloudSaveRuntime(wine);
   if (await unbridgedCloudSaveRuntime(wine)) {
     throw new Error('The active runtime has cloud saves without the required service bridge. Update the active runtime in Settings.');
@@ -1032,6 +1364,10 @@ async function prepareGameLaunch(id: string): Promise<void> {
   // its cached identity, instead of each waiting for its own connect timeout.
   const reachability: ConnectivityStatus = connectivity ? await connectivity.check() : { state: 'unknown' };
   const offlineLaunch = reachability.state === 'offline';
+  // Owned bundles let DLC discovery find content the package does not list.
+  // Load them while the launch prepares instead of only using a library the
+  // Library page happened to load; offline there is nothing to fetch.
+  const ownedAccess = offlineLaunch ? undefined : accountLibrary.startLaunchAccess();
   if (authState.stored === true && authState.username && await bindOfflineAccess(dataRoot, authState.username)) {
     emitLog('offline', 'Removed stored offline licenses and identities (account-changed).');
   }
@@ -1071,7 +1407,28 @@ async function prepareGameLaunch(id: string): Promise<void> {
   };
   const verboseLogs = process.env.XODUS_NEXUS_VERBOSE_LOGS === '1' || store.settings.verboseLogs;
   const gameLog = new GameLogReducer(appendGameLog, verboseLogs);
-  const addGameLog = (line: string) => gameLog.push(line);
+  const cloudDiagnostics = new CloudSaveDiagnostics();
+  let cloudNoticeShown = false;
+  const addGameLog = (line: string) => {
+    if (cloudRuntime && !offlineLaunch && cloudDiagnostics.observe(line)
+      && gameOperation?.id === operationId) {
+      gameOperation.cloudSaveWarning = cloudDiagnostics.message!;
+      scheduleSnapshot();
+      if (!cloudNoticeShown) {
+        cloudNoticeShown = true;
+        try {
+          if (Notification.isSupported()) {
+            const notice = new Notification({ title: nativeText('Cloud saves need attention'),
+              body: `${game.title}: ${nativeText(gameOperation.cloudSaveWarning)}`, urgency: 'critical' });
+            notice.on('failed', () => {});
+            notice.on('click', () => { void showLauncher().catch(() => {}); });
+            notice.show();
+          }
+        } catch { /* The session warning remains visible without desktop notifications. */ }
+      }
+    }
+    gameLog.push(line);
+  };
   writeLaunchLog(`Game: ${game.title}`);
   writeLaunchLog(`Mode: package manifest; cloud saves: ${cloudRuntime ? 'enabled' : 'not available in active runtime'}; verbose logs: ${verboseLogs ? 'on' : 'off'}`);
   writeLaunchLog(`Backend: ${binary}`);
@@ -1082,27 +1439,75 @@ async function prepareGameLaunch(id: string): Promise<void> {
   let inviteBridge: GameInviteBridge | undefined;
   let launchWrapper: GameWrapper | undefined;
   let releaseDisplay = () => {};
+  // Keep the authenticated request/session authoritative, including an explicit
+  // false. Only an otherwise context-free launch may use this primary's own
+  // validated Steam startup, covering both a cold shortcut and the Play button.
+  const steamContext = gameSteamContext({
+    request: steam ?? (steamLauncherSession ? { environment: steamLauncherSession.environment,
+      overlayFiltered: steamLauncherSession.overlayFiltered, signal: steamLauncherSession.lease.signal } : undefined),
+    primary: primarySteam ? { environment: primarySteam, overlayFiltered: primaryOverlayFiltered } : undefined,
+  });
+  const launchEnvironment = steamGameEnvironment(process.env, steamContext?.environment);
+  const restoreSteamOverlay = steamContext?.overlayFiltered === true;
+  const steamSignal = steam?.signal ?? steamLauncherSession?.lease.signal;
+  let removeSteamStop = () => {};
   try {
+    if (steam || steamLauncherSession) writeLaunchLog('Steam launch context forwarded from a shortcut.');
+    steamSignal?.throwIfAborted();
     if (game.launchTools?.dualSenseCompatibility) writeLaunchLog('DualSense compatibility mode enabled for this game (054c:0ce6).');
+    if (game.launchTools?.dualShock4Compatibility) writeLaunchLog('DualShock 4 compatibility mode enabled for this game (v1, v2 and wireless adapter).');
     await prepareSystemWallet();
-    const legacyPrefixRoot = path.join(dataRoot, 'prefixes', game.id);
-    const compatibilityDataPath = path.join(dataRoot, 'compatdata', game.id);
+    const legacyPrefixRoot = runtimeContext.legacyPrefixRoot;
+    const compatibilityDataPath = runtimeContext.compatibilityDataPath;
     const steamRoot = path.join(app.getPath('home'), '.steam', 'root');
-    launchWrapper = await prepareGameWrapper(wine, game.launchTools, path.join(dataRoot, 'launch-wrappers'), process.env, game.path);
-    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, launchWrapper.command, store.settings.shaderCacheLimitGiB);
+    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, steamRoot, store.settings.shaderCacheLimitGiB, { installPath: game.path, home: app.getPath('home'), environment: launchEnvironment });
     const wineCommand = protonRunner?.command ?? wine;
-    args[2] = preparedGameWine(protonRunner, launchWrapper.command);
+    // Play goes through the runtime's Proton session when one is available, so
+    // the runtime's own launch options (for example PROTON_USE_OPTISCALER) are
+    // processed. Game tools and launch options wrap that command, exactly like
+    // Steam's %command%.
+    // Steam's overlay is restored only inside the game's Wine/Proton command,
+    // and only from the trusted Steam installation root used above. Auth,
+    // services, prefix preparation and this launcher never receive it.
+    const steamOverlay = restoreSteamOverlay ? await steamOverlayLibraries(steamRoot).catch(() => undefined) : undefined;
+    if (restoreSteamOverlay) writeLaunchLog(steamOverlay
+      ? 'Steam overlay libraries available for the game command.'
+      : 'Steam overlay libraries were not found in the Steam installation; the game starts without the overlay.');
+    launchWrapper = await prepareGameWrapper(preparedGameWine(protonRunner, wine), game.launchTools, path.join(dataRoot, 'launch-wrappers'), launchEnvironment, game.path,
+      { steamOverlayLibraries: steamOverlay });
+    args[2] = launchWrapper.command;
+    if (protonRunner) {
+      // The optional component is selected by the game's launch options, not by
+      // the inherited environment.
+      const launchOptionsEnvironment = parseLaunchOptions(game.launchTools?.launchOptions ?? '').environment;
+      for (const notice of await protonOptionalComponentNotices({ ...launchEnvironment, ...launchOptionsEnvironment },
+        protonRunner.protonRoot, compatibilityDataPath, offlineLaunch)) addGameLog(notice);
+      // Options that depend on context this launch does not provide are
+      // reported with their specific bound reason. No missing identity is
+      // invented and no global active/inactive state is claimed.
+      for (const notice of await protonLaunchFeatureNotices({ ...launchEnvironment, ...launchOptionsEnvironment },
+        protonRunner.protonRoot, protonRunner.compatibilityLocation)) addGameLog(notice);
+    }
     if (inspected.vcRedistEncrypted) {
-      if (!protonRunner) throw new Error('This encrypted VC++ prerequisite requires a Proton prefix. Select Xodus Runtime in Settings.');
+      if (!protonRunner) throw new Error('This encrypted VC++ prerequisite requires a Proton prefix. Select Nexus Runtime in Settings.');
       const installed = await installedVcRuntimeVersion(path.join(compatibilityDataPath, 'pfx'));
       if (!installed || !versionAtLeast(installed, VC_REDIST_VERSION)) {
         throw new Error(`VC++ runtime ${installed ?? 'not found'} is too old for this encrypted installer. Right-click the game and choose Install / update VC++, then press Play.`);
       }
       addGameLog(`VC++ runtime ${installed} verified; launching the original package executable from a temporary decrypted launch view.`);
     }
-    const environment = antiCheatEnvironment(gameLocaleEnvironment(gameWindowEnvironment(gameLoggingEnvironment(protonRunner
-      ? { ...process.env }
-      : { ...process.env, WINEPREFIX: legacyPrefixRoot, WINEARCH: 'win64' }, verboseLogs)), locale));
+    const environment = launchEnvironmentForRuntime(antiCheatEnvironment(gameLocaleEnvironment(gameWindowEnvironment(gameLoggingEnvironment(protonRunner
+      ? launchEnvironment
+      : { ...launchEnvironment, WINEPREFIX: legacyPrefixRoot, WINEARCH: 'win64' }, verboseLogs)), locale)), Boolean(protonRunner));
+    if (process.platform === 'linux' && shortcuts.available) {
+      try {
+        const png = await loadShortcutIcon({ coverDataUrl: inspected.coverDataUrl ?? game.coverDataUrl }, bytes => {
+          const image = nativeImage.createFromBuffer(bytes);
+          return image.isEmpty() ? undefined : image.resize({ width: 256, height: 256 }).toPNG();
+        });
+        environment.WINE_APPLICATION_ID = await shortcuts.windowIdentity({ ...game, installState: inspected.installState }, png);
+      } catch { addGameLog('Game window icon unavailable.'); }
+    }
     // Never inherit another title's discovery list. Hints are scoped public
     // metadata, not licenses, and cannot make an optional lookup block Play.
     delete environment.NEXUS_RELATED_PRODUCT_IDS;
@@ -1114,7 +1519,8 @@ async function prepareGameLaunch(id: string): Promise<void> {
     delete environment.XODUS_FORCE_OFFLINE;
     delete environment.XODUS_ACCOUNT_HASH;
     if (await storeDiscoveryRuntime(wine)) {
-      const related = await contentManager().relatedProducts(game, accountLibrary.peekAccess(), currentMarket()).catch(() => {
+      const access = ownedAccess ? await ownedAccess(OWNED_ACCESS_WAIT_MS) : accountLibrary.peekAccess();
+      const related = await contentManager().relatedProducts(game, access, currentMarket(), undefined, offlineLaunch).catch(() => {
         addGameLog('Additional DLC discovery unavailable. Continuing with package-declared content.');
         return [] as string[];
       });
@@ -1150,8 +1556,8 @@ async function prepareGameLaunch(id: string): Promise<void> {
     const inviteRuntime=await gameInviteRuntime(wine);
     gameInviteUnavailableReason=!inviteRuntime?'The selected runtime does not support game invitations. Update the runtime and restart the game.':!titleId?'The game has no Xbox title information for invitations.':undefined;
     if(titleId&&/^[a-f0-9]{1,8}$/i.test(titleId)&&inviteRuntime){
-      const account=authState.username,epoch=xboxSocial.epoch;
-      const current=()=>!shutdownStarted&&authState.stored===true&&authState.username===account&&xboxSocial.epoch===epoch;
+      const account=authState.player??authState.username,epoch=xboxSocial.epoch;
+      const current=()=>!shutdownStarted&&authState.stored===true&&(authState.player??authState.username)===account&&xboxSocial.epoch===epoch;
       inviteBridge=new GameInviteBridge(operationId,game.title,String(parseInt(titleId,16)),current,emitSnapshot,()=>{void showFriends().catch(()=>{});},Date.now,sender=>{
         if(!Notification.isSupported())return;
         try{const notice=new Notification({title:nativeText('Game invitation'),body:nativeText(`${sender} invited you to ${game.title}. Open Friends to accept.`),urgency:'normal'});notice.on('click',()=>{void showFriends().catch(()=>{});});notice.on('failed',()=>{});notice.show();}catch{/* The dock remains available without desktop notifications. */}
@@ -1162,9 +1568,10 @@ async function prepareGameLaunch(id: string): Promise<void> {
       }catch{await inviteBridge.stop().catch(()=>{});inviteBridge=undefined;gameInviteUnavailableReason='The game invitation connection could not be started. Restart the game to try again.';addGameLog('Optional game invitations are unavailable for this launch.');}
     }
     // Names the account for the runtime's offline identity cache (an opaque key, never the username).
-    if (authState.stored === true && authState.username) environment.XODUS_ACCOUNT_HASH = accountCacheKey(authState.username);
+    if (authState.stored === true && authState.username) environment.XODUS_ACCOUNT_HASH = accountCacheKey(authState.player ?? authState.username);
     if (protonRunner) addGameLog(`Proton prefix: ${protonRunner.compatibilityDataPath}/pfx`);
     else await fs.mkdir(legacyPrefixRoot, { recursive: true });
+    steamSignal?.throwIfAborted();
     const tracked = await spawnGameProcess(binary, args, {
       cwd: game.path,
       env: environment,
@@ -1174,11 +1581,27 @@ async function prepareGameLaunch(id: string): Promise<void> {
     operations.set(operationId, tracked.child);
     gameProcesses.set(operationId, tracked);
     gameGuide?.bind(id,game.title,tracked.child.pid);
-    releaseDisplay = gameDisplay.acquire();
     gameOperation.status = 'running';
     gameOperation.phase = 'Xodus is running; waiting for the game window…';
+    if (steamSignal) {
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      const stop = () => {
+        if (gameOperation?.id === operationId) {
+          gameOperation.status = 'stopping'; gameOperation.phase = 'Stopping Xodus and Wine…'; scheduleSnapshot();
+        }
+        void tracked.stop().catch(error => console.error('Steam shortcut stop failed:', error));
+        forceTimer = setTimeout(() => {
+          if (gameProcesses.get(operationId) === tracked) void tracked.forceStop().catch(error => console.error('Steam shortcut force-stop failed:', error));
+        }, 8000);
+        forceTimer.unref();
+      };
+      steamSignal.addEventListener('abort', stop, { once: true });
+      removeSteamStop = () => { steamSignal.removeEventListener('abort', stop); clearTimeout(forceTimer); };
+      if (steamSignal.aborted) stop();
+    }
+    releaseDisplay = gameDisplay.acquire();
     emitSnapshot();
-    void tracked.result.then((result) => {
+    const completion = tracked.result.then((result) => {
       addGameLog(`The Xodus process exited with code ${result.code}.`);
       if (!gameOperation || gameOperation.id !== operationId) return;
       gameOperation.finishedAt = new Date().toISOString();
@@ -1200,6 +1623,7 @@ async function prepareGameLaunch(id: string): Promise<void> {
       gameOperation.phase = gameOperation.error;
       gameOperation.finishedAt = new Date().toISOString();
     }).finally(async () => {
+      removeSteamStop();
       releaseDisplay();gameGuide?.unbind(id);
       finalizingGame = true;
       try {
@@ -1216,9 +1640,17 @@ async function prepareGameLaunch(id: string): Promise<void> {
         launchLog.end();
         emitSnapshot();
         if (gameOperation?.status === 'failed' && shortcutOnly) await shortcutError(new Error(gameOperation.error ?? 'The game exited with an error.'));
+        else await warnShortcutCloudFailure(shortcutOnly, gameOperation?.cloudSaveWarning, {
+          showLauncher,
+          warn: warning => dialog.showMessageBox(mainWindow!, { type: 'warning', title: nativeText('Cloud saves need attention'),
+            message: game.title, detail: nativeText(warning) }),
+        });
       } finally { finalizingGame = false; finishShortcutSession(); }
-    });
+    }).finally(() => { if (gameFinalizations.get(id) === completion) gameFinalizations.delete(id); });
+    gameFinalizations.set(id, completion);
+    void completion.catch(error => console.error('Game finalization failed:', error));
   } catch (error) {
+    removeSteamStop();
     releaseDisplay();gameGuide?.unbind(id);
     await inviteBridge?.stop().catch(()=>{});gameInviteBridges.delete(operationId);
     await launchWrapper?.cleanup().catch(() => undefined);
@@ -1241,8 +1673,10 @@ async function installGameVcRuntime(id: string): Promise<void> {
   if (!game) throw new Error('Game not found.');
   const inspected = await inspectGameDirectory(game.path);
   if (inspected.installState !== 'ready') throw new Error(inspected.installMessage ?? 'The game installation is not ready.');
-  const wine = selectedWinePath(store.settings.winePath, store.settings.runtimeRoot, runtime.current.winePath);
-  if (!wine) throw new Error('Select Xodus Runtime in Settings first.');
+  const runtimeContext = await resolveGameRuntime({runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot),defaultWine:selectedWinePath(store.settings.winePath,store.settings.runtimeRoot,runtime.current.winePath),...gameRuntimeParameters(game)});
+  const wine = runtimeContext.winePath;
+  await bindRuntimePrefix(runtimeContext);
+  if (!wine) throw new Error('Select Nexus Runtime in Settings first.');
   await fs.access(wine, constants.X_OK);
 
   const operationId = `vc-${id}`;
@@ -1275,8 +1709,12 @@ async function installGameVcRuntime(id: string): Promise<void> {
   const controller = new AbortController();
   preparationControllers.set(operationId, controller);
   try {
-    const compatibilityDataPath = path.join(dataRoot, 'compatdata', game.id);
-    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, path.join(app.getPath('home'), '.steam', 'root'), undefined, store.settings.shaderCacheLimitGiB);
+    const compatibilityDataPath = runtimeContext.compatibilityDataPath;
+    // This operation has no incoming game launch context: one sanitized copy of
+    // the primary process environment feeds both prefix initialization and the
+    // installer. The process environment itself is not modified.
+    const { environment, installerEnvironment } = vcOperationEnvironment();
+    const protonRunner = await prepareProtonRunner(wine, compatibilityDataPath, path.join(app.getPath('home'), '.steam', 'root'), store.settings.shaderCacheLimitGiB, { environment });
     if (!protonRunner) throw new Error('VC++ installation requires a full Proton runtime, not a standalone Wine binary.');
     const prefix = path.join(compatibilityDataPath, 'pfx');
     const previous = await installedVcRuntimeVersion(prefix);
@@ -1298,7 +1736,7 @@ async function installGameVcRuntime(id: string): Promise<void> {
       preparationControllers.delete(operationId);
       addLine('Microsoft installer SHA-256 verified. Installing into this game’s Proton prefix…');
       const tracked = spawnTracked(protonRunner.command, [installer, '/install', '/quiet', '/norestart'], {
-        env: gameLoggingEnvironment({ ...process.env }),
+        env: installerEnvironment,
         onLine: addLine,
         maxOutput: 1_000_000,
       });
@@ -1339,6 +1777,14 @@ function currentMarket(): string {
   return configured.toLowerCase() === 'neutral' ? app.getLocaleCountryCode() || 'US' : configured;
 }
 
+// Title history artwork is optional: the native service omits an image when
+// the Xbox URL it received is not accepted. Fill only missing covers from the
+// verified public Store title-ID mapping; never replace service artwork and
+// never fail the player's history when Store metadata is unavailable.
+async function xboxProfileGames(xuid:string):Promise<XboxProfileGames>{
+  return readXboxProfileGames(xboxNativeSocial,xuid,titleIds=>catalog.artworkForXboxTitleIds(titleIds,currentMarket()));
+}
+
 // Fetch real covers and wide art even when an installation has a small logo.
 async function enrichDownloadCovers(tasks: readonly DownloadTask[], market: string): Promise<void> {
   const missing = tasks.filter(task => !task.coverUrl && ['queued', 'running', 'paused'].includes(task.status));
@@ -1359,12 +1805,18 @@ async function enrichLibraryCovers(): Promise<void> {
   const missing = store.games.filter((game) => game.storeId && (!game.coverUrl || !game.heroUrl));
   if (missing.length === 0) return;
   const artwork = await catalog.artwork(missing.map((game) => game.storeId!), currentMarket());
-  for (const game of missing) {
+  const requested = new Map(missing.map(game => [game.id, game.storeId]));
+  const updates: { id: string; patch: Partial<Game> }[] = [];
+  // Recheck the live entries after the fetch: games can be removed or changed
+  // while artwork is in flight, and existing art must not be replaced.
+  for (const game of store.games) {
+    if (!game.storeId || requested.get(game.id) !== game.storeId) continue;
     const images = artwork.get(game.storeId!.toUpperCase());
-    if (images) await store.patchGame(game.id, {
-      coverUrl: images.coverUrl ?? game.coverUrl, heroUrl: images.heroUrl ?? game.heroUrl,
-    });
+    if (images && ((!game.coverUrl && images.coverUrl) || (!game.heroUrl && images.heroUrl))) updates.push({ id: game.id, patch: {
+      coverUrl: game.coverUrl || images.coverUrl, heroUrl: game.heroUrl || images.heroUrl,
+    } });
   }
+  await store.patchGames(updates);
 }
 
 async function loadDemoCovers(): Promise<void> {
@@ -1381,13 +1833,21 @@ async function loadDemoCovers(): Promise<void> {
 // the live Microsoft Store catalog so demo screenshots show real data.
 function registerDemoIpc(catalogMarket: () => string): void {
   ipcMain.handle('get-snapshot', () => snapshot());
+  ipcMain.handle('component-updates-status', () => ({running:false}));
+  ipcMain.handle('component-updates-plan', () => {throw Error('Component updates are unavailable in demo mode.');});
+  ipcMain.handle('component-updates-apply', () => {throw Error('Component updates are unavailable in demo mode.');});
+  ipcMain.handle('component-updates-retry', () => {throw Error('Component updates are unavailable in demo mode.');});
   ipcMain.handle('backend-refresh', () => snapshot().backend);
   ipcMain.handle('backend-check-update', () => snapshot().backend);
   ipcMain.handle('backend-update', () => {});
-  ipcMain.handle('backend-rebuild', () => {});
+  ipcMain.handle('backend-import', () => {throw Error('Local backend import is unavailable in the synthetic demo.');});
   ipcMain.handle('runtime-refresh', () => snapshot().runtime);
+  ipcMain.handle('runtime-families', () => []);
   ipcMain.handle('runtime-check-update', () => snapshot().runtime);
   ipcMain.handle('runtime-check-nexus', () => snapshot().runtime);
+  ipcMain.handle('runtime-family-check', () => {throw Error('Managed runtime installation is unavailable in the synthetic demo.');});
+  ipcMain.handle('runtime-family-install', () => {throw Error('Managed runtime installation is unavailable in the synthetic demo.');});
+  ipcMain.handle('runtime-family-import', () => {throw Error('Managed runtime installation is unavailable in the synthetic demo.');});
   ipcMain.handle('runtime-install', () => {});
   ipcMain.handle('runtime-install-nexus', () => {});
   ipcMain.handle('runtime-rollback-preview', () => {});
@@ -1404,15 +1864,21 @@ function registerDemoIpc(catalogMarket: () => string): void {
   ipcMain.handle('copy-diagnostic-log', () => clipboard.writeText('Demo diagnostic log. No account data.'));
   ipcMain.handle('reveal-diagnostic-log', () => undefined);
   ipcMain.handle('read-backend-diagnostic-log', () => ({ name: 'backend.log', content: 'Sample backend diagnostics. No account data.', truncated: false }));
-  ipcMain.handle('create-diagnostic-report', () => ({ name: 'nexus-diagnostics-demo.txt', content: 'Xodus Nexus diagnostic report\nDemo data only.\nLauncher: ' + app.getVersion() }));
+  ipcMain.handle('create-diagnostic-report', () => ({ name: 'nexus-diagnostics-demo.txt', content: 'Nexus Launcher diagnostic report\nDemo data only.\nLauncher: ' + app.getVersion() }));
   ipcMain.handle('save-diagnostic-report', (_event, content: unknown) => saveReviewedReport(content));
   ipcMain.handle('login', () => {});
   ipcMain.handle('logout', () => {});
+  ipcMain.handle('use-account', () => {});
+  ipcMain.handle('forget-account', () => {});
   ipcMain.handle('offline-permissions', () => ({ enabled: false, requestSuccess: true, remainingToggles: 2, maxToggles: 3, periodDays: 365, checkedAt: new Date().toISOString() }));
   ipcMain.handle('set-offline-permissions', (_event, enabled: boolean) => ({ enabled: Boolean(enabled), requestSuccess: true, remainingToggles: 1, maxToggles: 3, periodDays: 365, checkedAt: new Date().toISOString() }));
-  ipcMain.handle('catalog-search', (_event, query: string, cursor?: string) => catalog.search(query, catalogMarket(), cursor));
-  ipcMain.handle('catalog-featured', () => catalog.featured(catalogMarket()));
+  ipcMain.handle('catalog-search', (_event, query: string, cursor?: string) => catalog.search(query, publicStoreMarket(), cursor));
+  ipcMain.handle('catalog-featured', () => catalog.featured(publicStoreMarket()));
+  ipcMain.handle('catalog-browse', (_event, cursor?: string) => catalog.browse(publicStoreMarket(), cursor));
+  ipcMain.handle('catalog-recent-gamepass', () => homeGamePassShelf.get(publicStoreMarket()));
+  ipcMain.handle('store-access', () => ({configuredMarket:snapshot().settings.market,account:snapshot().auth.username??'demo',backend:snapshot().backend.binaryPath??'',market:catalogMarket(),checkedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60_000).toISOString(),accessByProductId:{}}));
   ipcMain.handle('account-library', (_event, kind: 'all' | 'owned' | 'gamepass') => demoAccountLibrary(kind, demoArtwork));
+  ipcMain.handle('stop-game-update-check', () => {});
   ipcMain.handle('start-install', () => 'demo-download');
   ipcMain.handle('install-plan', () => { throw Error('Package selection is unavailable in demo mode.'); });
   ipcMain.handle('game-content', (_event, id: string) => ({ gameId: id, checkedAt: new Date().toISOString(), items: [] }));
@@ -1429,11 +1895,12 @@ function registerDemoIpc(catalogMarket: () => string): void {
     return { ...game, ...patch };
   });
   ipcMain.handle('remove-game', () => {});
+  ipcMain.handle('game-runtime-readiness', () => false); // Synthetic demo never validates managed payloads.
   ipcMain.handle('game-launch-options', () => demoLaunchOptions);
   ipcMain.handle('game-details', async (_event, id: unknown) => {
     const game = demoGames.find(game => game.id === id);
     const target=typeof id==='object'?gameDetailsTarget(id,[]):game?gameDetailsTarget(id,demoGames):undefined;
-    return target?.productId ? catalog.gameDetails(target.productId, catalogMarket()) : undefined;
+    return target?.productId ? catalog.gameDetails(target.productId, catalogDetailMarket(target.scope, catalogMarket())) : undefined;
   });
   ipcMain.handle('game-activity', () => ({ status: 'unavailable' }));
   ipcMain.handle('game-achievements', () => ({ status: 'unavailable' }));
@@ -1459,6 +1926,18 @@ function registerDemoIpc(catalogMarket: () => string): void {
   ipcMain.handle('xbox-party-accept',acceptPartyInvite);
  ipcMain.handle('xbox-invites',async event=>{socialSender(event);return (await xboxInvites.list()).filter(invite=>invite.kind==='party');});
   ipcMain.handle('open-path', () => {});
+  registerDemoSocialIpc(ipcMain, {
+    authorize: event => {
+      if (event.senderFrame !== event.sender.mainFrame || event.sender !== mainWindow?.webContents && !chatWindows.owns(event)) throw Error('Demo Social requests must come from Nexus.');
+    },
+    emit: (channel, value) => { mainWindow?.webContents.send(channel, value); for (const contents of chatWindows.contents) contents.send(channel, value); },
+    openProfile: async xuid => {
+      if (xuid !== 'me' && !/^100[0-7]$/.test(xuid)) throw Error('Unknown demo player.');
+      desktopProfileRequest = { id: randomUUID(), xuid }; await showLauncher();
+      mainWindow?.webContents.send('xbox-desktop-profile', desktopProfileRequest);
+    },
+    popOutChat: xuid => chatWindows.show(xuid),
+  });
 }
 
 function socialSender(event:Electron.IpcMainInvokeEvent):void{
@@ -1472,6 +1951,12 @@ async function acceptPartyInvite(event:Electron.IpcMainInvokeEvent,offer:string,
  return xboxParty.accept(offer,handle);
 }
 function registerIpc(): void {
+  ipcMain.handle('show-touch-keyboard',(event,field:unknown)=>{
+    // Only the launcher and its own pop-out chat windows may request the keyboard.
+    const window=event.sender===mainWindow?.webContents?mainWindow
+      :chatWindows.owns(event)?BrowserWindow.fromWebContents(event.sender):null;
+    return steamKeyboard.show(event,window,field);
+  });
   ipcMain.handle('xbox-overlay-recording',async(event,recording:unknown)=>{
     if(event.sender!==mainWindow?.webContents||event.senderFrame!==event.sender.mainFrame||typeof recording!=='boolean')throw Error('Invalid shortcut recording request.');
     if(recording&&!mainWindow?.isFocused())throw Error('Focus Nexus to record a shortcut.');
@@ -1484,7 +1969,10 @@ function registerIpc(): void {
     desktopProfileRequest={id:randomUUID(),xuid:value};await showLauncher();
     mainWindow?.webContents.send('xbox-desktop-profile',desktopProfileRequest);
   });
-  ipcMain.handle('xbox-desktop-profile',event=>{socialSender(event);return event.sender===mainWindow?.webContents?desktopProfileRequest:undefined;});
+  ipcMain.handle('xbox-desktop-profile',event=>{
+    if(event.sender!==mainWindow?.webContents||event.senderFrame!==event.sender.mainFrame)throw Error('Read desktop profiles through Nexus.');
+    return desktopProfileRequest;
+  });
 
  ipcMain.handle('xbox-game-invite-availability',event=>{socialSender(event);return nativeInviteAvailability();});
  ipcMain.handle('xbox-game-invite-send',(event,xuid:string)=>{socialSender(event);const bridge=availableNativeInvite();if(!bridge)throw Error('Start an online game session to invite someone.');bridge.invite(xuid);});
@@ -1501,7 +1989,7 @@ function registerIpc(): void {
   chatReads.viewed(account,binary,peer,ids);
  });
   ipcMain.handle('xbox-player-details',(event,xuid:string)=>{socialSender(event);return xboxNativeSocial.details(xuid);});
-  ipcMain.handle('xbox-player-games',(event,xuid:string)=>{socialSender(event);return xboxNativeSocial.games(xuid);});
+  ipcMain.handle('xbox-player-games',(event,xuid:string)=>{socialSender(event);return xboxProfileGames(xuid);});
   ipcMain.handle('xbox-social-people',(event,list:Parameters<NativeXboxSocial['people']>[0],query?:string)=>{socialSender(event);return xboxNativeSocial.people(list,query);});
   ipcMain.handle('xbox-social-relationship',(event,xuid:string)=>{socialSender(event);return xboxNativeSocial.relationship(xuid);});
   ipcMain.handle('xbox-social-relationship-change',(event,account:string,xuid:string,action:Parameters<NativeXboxSocial['changeRelationship']>[2])=>{socialSender(event);return xboxNativeSocial.changeRelationship(account,xuid,action);});
@@ -1518,31 +2006,55 @@ function registerIpc(): void {
   ipcMain.handle('get-snapshot', () => snapshot());
   ipcMain.handle('backend-refresh', async () => { const value = await backend.refresh(); await refreshAccount(false); emitSnapshot(); return value; });
   ipcMain.handle('backend-check-update', async () => { const value = await backend.checkUpdate(); emitSnapshot(); return value; });
-  ipcMain.handle('backend-update', async () => { await backend.update(emitSnapshot); await refreshAccount(); });
-  ipcMain.handle('backend-rebuild', async () => { await backend.rebuild(emitSnapshot); await refreshAccount(); });
-  ipcMain.handle('runtime-refresh', async () => { const value = await runtime.refresh(); await syncManagedWinePath(); await refreshAccount(false); emitSnapshot(); return value; });
+  ipcMain.handle('component-updates-status', () => componentUpdates!.current);
+  ipcMain.handle('component-updates-plan', () => componentUpdates!.plan());
+  ipcMain.handle('component-updates-apply', (_event,id:unknown) => {if(typeof id!=='string'||id.length>80)throw Error('Invalid update plan.');return componentUpdates!.apply(id);});
+  ipcMain.handle('component-updates-retry', (_event,id:unknown,item:unknown) => {if(typeof id!=='string'||id.length>80||typeof item!=='string'||item.length>80)throw Error('Invalid update retry.');return componentUpdates!.apply(id,item);});
+  ipcMain.handle('backend-update', async () => {
+    // A rejected activity gate never enters BackendManager, so the attempt is
+    // recorded here as a fixed blocker instead of vanishing from diagnostics.
+    try { ensureIdle(); }
+    catch (error) { backendDiagnostic({ operation: 'update', event: 'failure', stage: 'update-blocked', committed: false }); throw error; }
+    await backend.update(emitSnapshot); await refreshAccount();
+  });
+  ipcMain.handle('backend-import', async (_event,directory:unknown) => {
+    if(typeof directory!=='string'||directory.length>4096)throw Error('Invalid local backend directory.');
+    try { ensureIdle(); }
+    catch (error) { backendDiagnostic({ operation: 'update', event: 'failure', stage: 'update-blocked', committed: false }); throw error; }
+    const value=await backend.importLocal(directory,emitSnapshot);await refreshAccount();return value;
+  });
+  ipcMain.handle('runtime-refresh', async () => {
+    ensureIdle();
+    return runtime.refreshSelection(emitSnapshot, async () => {
+      await syncManagedWinePath();
+      await refreshAccount(false);
+    });
+  });
+  ipcMain.handle('runtime-family-check', (_event,family:unknown,options:unknown) => runtime.checkManagedRuntime(family,options,emitSnapshot));
+  ipcMain.handle('runtime-family-install', (_event,family:unknown,expected:unknown,options:unknown) => {ensureIdle();return runtime.installManagedRuntime(family,expected,options,emitSnapshot);});
+  ipcMain.handle('runtime-family-import', (_event,family:unknown,directory:unknown,options:unknown) => {ensureIdle();return runtime.importManagedRuntime(family,directory,options,emitSnapshot);});
   ipcMain.handle('runtime-check-update', async () => { const value = await runtime.check(); emitSnapshot(); return value; });
   ipcMain.handle('runtime-check-nexus', async () => { const value = await runtime.checkNexus(); emitSnapshot(); return value; });
   ipcMain.handle('runtime-install', async () => {
     ensureIdle();
-    const winePath = await runtime.install(emitSnapshot);
-    await store.setSettings({ winePath });
-    await refreshAccount(false);
-    emitSnapshot();
+    await runtime.install(emitSnapshot, {
+      persistSelection: async winePath => { await store.setSettings({ winePath }); },
+      refreshAccount: async () => { await refreshAccount(false); emitSnapshot(); },
+    });
   });
   ipcMain.handle('runtime-install-nexus', async () => {
     ensureIdle();
-    const winePath = await runtime.installNexus(emitSnapshot);
-    await store.setSettings({ winePath });
-    await refreshAccount(false);
-    emitSnapshot();
+    await runtime.installNexus(emitSnapshot, {
+      persistSelection: async winePath => { await store.setSettings({ winePath }); },
+      refreshAccount: async () => { await refreshAccount(false); emitSnapshot(); },
+    });
   });
   ipcMain.handle('runtime-rollback-preview', async () => {
     ensureIdle();
-    const winePath = await runtime.rollbackCloudSavePreview(emitSnapshot);
-    await store.setSettings({ winePath });
-    await refreshAccount(false);
-    emitSnapshot();
+    await runtime.rollbackCloudSavePreview(emitSnapshot, {
+      persistSelection: async winePath => { await store.setSettings({ winePath }); },
+      refreshAccount: async () => { await refreshAccount(false); emitSnapshot(); },
+    });
   });
   ipcMain.handle('account-refresh', () => refreshAccount());
   const socialClient=(event:Electron.IpcMainInvokeEvent)=>{
@@ -1580,8 +2092,11 @@ function registerIpc(): void {
   ipcMain.handle('check-launcher-update', async () => { await checkLauncherUpdate(); emitSnapshot(); return snapshot().launcherUpdate; });
   ipcMain.handle('install-launcher-update', async () => { ensureIdle(); if (authState.running) throw new Error('Wait for sign-in to finish.'); await launcherUpdater.install(); });
   ipcMain.handle('rollback-launcher-update', async () => { ensureIdle(); await launcherUpdater.rollback(); });
-  ipcMain.handle('restart-launcher', () => {
+  ipcMain.handle('restart-launcher', async () => {
     ensureIdle();
+    const owner=componentUpdateAdmission.reserve();
+    try {
+    await launcherUpdater.assertRestartReady();
     if (!launcherUpdater.state.restartRequired || !launcherUpdater.targetPath) throw new Error('No launcher restart is pending.');
     // AppImage sets these again for the new mount. Do not reuse the old mount.
     for (const key of ['APPIMAGE', 'APPDIR', 'ARGV0', 'OWD']) delete process.env[key];
@@ -1591,7 +2106,9 @@ function registerIpc(): void {
       else process.env[key] = externalEnvironment[key];
     }
     app.relaunch({ execPath: launcherUpdater.targetPath, args: [] }); app.quit();
+    } finally {componentUpdateAdmission.release(owner);}
   });
+  ipcMain.handle('stop-game-update-check', () => stopGameUpdateCheck());
   ipcMain.handle('check-game-updates', (_event, id?: string) => {
     if (gameUpdateJob) return gameUpdateJob;
     gameUpdateJob = checkGameUpdates(id).finally(() => { gameUpdateJob = undefined; });
@@ -1610,8 +2127,10 @@ function registerIpc(): void {
     if (!gameOperation?.logPath || gameOperation.id !== id) throw new Error('This diagnostic log is no longer available.');
     await copyDiagnosticFile(gameOperation.logPath, path.join(path.dirname(store.settings.runtimeRoot), 'logs'), text => clipboard.writeText(text));
   });
-  ipcMain.handle('login', () => requestAuth('login'));
-  ipcMain.handle('logout', () => requestAuth('logout'));
+  ipcMain.handle('use-account', (_event, name: unknown) => requestSavedAccount('use', name));
+  ipcMain.handle('forget-account', (_event, name: unknown) => requestSavedAccount('forget', name));
+  ipcMain.handle('login', (_event, player?: unknown) => player === true ? requestAuth('login', true) : requestAuth('login'));
+  ipcMain.handle('logout', (_event, player?: unknown) => player === true ? requestAuth('logout', true) : requestAuth('logout'));
   ipcMain.handle('offline-permissions', async () => {
     if (offlinePermissionChanging) throw Error('Wait for the offline-permission change to finish.');
     if (authState.running || authState.stored !== true || !authState.username) throw Error('Sign in before changing offline permissions.');
@@ -1646,8 +2165,9 @@ function registerIpc(): void {
     } finally { offlinePermissionChanging = false; }
   });
   ipcMain.handle('catalog-search', (_event, query: string, cursor?: string) => {
-    return catalog.search(query, catalogMarket(), cursor);
+    return catalog.search(query, publicStoreMarket(), cursor);
   });
+  ipcMain.handle('store-access', (_event, requested?: unknown) => storeAccess(requested as string[] | undefined));
   ipcMain.handle('account-library', (_event, kind: 'all' | 'owned' | 'gamepass' | 'other', cursor?: string, refresh = false, sort?: 'recent-gamepass') => {
     if (authState.running || authState.stored !== true) throw Error('Finish signing in before loading account games.');
     accountLibrary.select(authState.username, backend.current.capabilities.library ? backend.current.binaryPath : undefined, currentMarket());
@@ -1663,11 +2183,13 @@ function registerIpc(): void {
     });
   });
   ipcMain.handle('save-diagnostic-report', (_event, content: unknown) => saveReviewedReport(content));
-  ipcMain.handle('catalog-featured', () => catalog.featured(catalogMarket()));
+  ipcMain.handle('catalog-featured', () => catalog.featured(publicStoreMarket()));
+  ipcMain.handle('catalog-browse', (_event, cursor?: string) => catalog.browse(publicStoreMarket(), cursor));
+  ipcMain.handle('catalog-recent-gamepass', () => homeGamePassShelf.get(publicStoreMarket()));
   ipcMain.handle('start-install', (_event, request: InstallRequest) => startInstall(request));
   ipcMain.handle('install-plan', async (_event, raw: string, destination?: string) => {
     const binary = requireBackend('streaming');
-    if (!backend.current.capabilities.packageSelection) throw Error('Update the Xodus backend in Settings to choose installation packages.');
+    if (!backend.current.capabilities.packageSelection) throw Error('Update the Nexus backend in Settings to choose installation packages.');
     const productId = safeProductId(raw), market = currentMarket();
     const availableBytes = destination === undefined ? undefined : await availableInstallBytes(destination);
     const plan = await installPlans.get(binary, productId, market, Boolean(backend.current.capabilities.contentPackageSelection));
@@ -1688,12 +2210,14 @@ function registerIpc(): void {
   });
   ipcMain.handle('cancel-download', async (_event, id: string, mode?: 'keep' | 'delete-files') => cancelDownload(id, mode));
   ipcMain.handle('pause-download', (_event, id: string) => {
+    componentUpdateAdmission.assertAllowed();
     if (downloadCancellations.has(id)) throw Error('This download is being cancelled.');
     const control = downloadControls.get(id);
     if (!control) throw new Error('Pause requires a backend with download controls. Update the Nexus backend in Settings.');
     return control(true);
   });
   ipcMain.handle('resume-download', (_event, id: string) => {
+    componentUpdateAdmission.assertAllowed();
     if (downloadCancellations.has(id)) throw Error('This download is being cancelled.');
     const control = downloadControls.get(id);
     if (!control) {
@@ -1711,7 +2235,7 @@ function registerIpc(): void {
           if (task.kind === 'content') {
             if (!task.gameId) throw Error('Content download has no parent game.');
             await installGameContent(task.gameId, task.productId);
-          } else await startInstall({ productId: task.productId, title: task.title, destination: task.destination, selectedContentId: task.selectedContentId, selectionMarket: task.selectionMarket }, game, resumed);
+          } else await startInstall({ source:task.source, productId: task.productId, title: task.title, destination: task.destination, selectedContentId: task.selectedContentId, selectionMarket: task.selectionMarket }, game, resumed);
           await store.removeDownload(id);
         } catch (error) { task.status = 'paused'; throw error; }
         finally { emitSnapshot(); }
@@ -1719,15 +2243,16 @@ function registerIpc(): void {
     }
     return control(false);
   });
-  ipcMain.handle('remove-download', async (_event, id: string) => { if (downloadCancellations.size) throw Error('Wait for cancellation cleanup.'); await store.removeDownload(id); emitSnapshot(); });
-  ipcMain.handle('clear-finished-downloads', async () => { if (downloadCancellations.size) throw Error('Wait for cancellation cleanup.'); await store.clearFinishedDownloads(); emitSnapshot(); });
+  ipcMain.handle('remove-download', async (_event, id: string) => { componentUpdateAdmission.assertAllowed(); if (downloadCancellations.size) throw Error('Wait for cancellation cleanup.'); await store.removeDownload(id); emitSnapshot(); });
+  ipcMain.handle('clear-finished-downloads', async () => { componentUpdateAdmission.assertAllowed(); if (downloadCancellations.size) throw Error('Wait for cancellation cleanup.'); await store.clearFinishedDownloads(); emitSnapshot(); });
   ipcMain.handle('import-game', (_event, input?: string) => importGame(input));
   ipcMain.handle('game-locales', async (_event, id: string) => {
     const game = store.games.find((entry) => entry.id === id);
     if (!game) throw new Error('Game not found.');
     return gameLocales(game);
   });
-  ipcMain.handle('update-game', async (_event, id: string, patch: Partial<Game>) => {
+  ipcMain.handle('runtime-families', async () => {const families=await runtime.refreshFamilies();emitSnapshot();return families;});
+  ipcMain.handle('update-game', async (_event, id: string, patch: Partial<Game>&RuntimeSettingsRequest) => {
     const allowed: Partial<Game> = {};
     for (const key of ['title', 'executable', 'launchArgs'] as const) if (typeof patch[key] === 'string') allowed[key] = patch[key];
     if ('launchTools' in patch) allowed.launchTools = normalizeLaunchTools(patch.launchTools);
@@ -1736,12 +2261,34 @@ function registerIpc(): void {
       if (!game) throw new Error('Game not found.');
       allowed.locale = supportedGameLocale(patch.locale) ?? '';
     }
-    const game = await store.patchGame(id, allowed);
+    let game: Game;
+    if ('runtime' in patch || 'runtimeSeparatePrefix' in patch) {
+      const current=store.games.find(entry=>entry.id===id);
+      if(!current)throw Error('Game not found.');
+      const snapshot=structuredClone(current);
+      const changing=gameRuntimeSelection('runtime' in patch?patch.runtime:snapshot.runtime)!==gameRuntimeSelection(snapshot.runtime);
+      // A real family change holds the activity slot through verification and the
+      // persisted write, so no launch or component update can enter in between.
+      game=await guardedRuntimeSettings({current:snapshot,request:patch,
+        paths:{runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot)},changing,
+        reserve:()=>{
+          // A per-game runtime-family change is a profile setting, not a
+          // runtime/component payload mutation. The reservation itself performs
+          // only the narrow setting guard (downloads/updates allowed), then holds
+          // normal component-update ownership so launches/component updates stay
+          // excluded across async verification and the persisted write.
+          const owner=componentUpdateAdmission.reserve(()=>ensureActivityIdle(undefined,undefined,true));
+          return {admit:()=>ensureIdle(undefined,undefined,owner,true),release:()=>componentUpdateAdmission.release(owner)};
+        },
+        read:()=>store.games.find(entry=>entry.id===id),
+        persist:(runtime)=>store.patchGame(id,{...allowed,...runtime})});
+    } else game=await store.patchGame(id, allowed);
     emitSnapshot();
     return game;
   });
   ipcMain.handle('remove-game', async (_event, id: string, mode: 'library' | 'delete-files') => {
     if (mode !== 'library' && mode !== 'delete-files') throw new Error('Invalid removal option.');
+    await stopGameUpdateCheck();
     ensureIdle('remove');
     const game = store.games.find((entry) => entry.id === id);
     if (!game) throw new Error('Game not found.');
@@ -1763,45 +2310,49 @@ function registerIpc(): void {
       gameRemovalInProgress = false;
     }
   });
+  ipcMain.handle('game-runtime-readiness', (_event, id: string) => gameRuntimeReadiness(()=>({game:store.games.find(game=>game.id===id),runtimeRoot:store.settings.runtimeRoot,dataRoot:path.dirname(store.settings.runtimeRoot),defaultWine:selectedWinePath(store.settings.winePath,store.settings.runtimeRoot,runtime.current.winePath)})));
   ipcMain.handle('game-launch-options', (_event, id: string) => gameLaunchOptions(id));
   ipcMain.handle('game-details', async (_event, id: unknown) => {
     const target=gameDetailsTarget(id,store.games);
     if (!target.productId) return undefined;
-    const market = currentMarket();
+    // Only an explicit public Store presentation scope selects public browsing
+    // metadata. A saved game ID and an unscoped Library product keep the real
+    // account market.
+    const market=catalogDetailMarket(target.scope,currentMarket());
     const details = await catalog.gameDetails(target.productId, market);
-    if (market !== currentMarket()) throw Error('Store market changed. Try again.');
+    if (market !== catalogDetailMarket(target.scope,currentMarket())) throw Error('Store market changed. Try again.');
     return details;
   });
   ipcMain.handle('game-activity', async (_event, id: unknown, refresh = false) => {
     if (typeof refresh !== 'boolean') throw Error('Invalid activity request.');
     const target=gameDetailsTarget(id,store.games),market=currentMarket();
-    if (authState.running || authState.stored !== true || !authState.username) return { status: 'signed-out' };
+    if (authState.running || !(authState.player ?? (authState.stored === true ? authState.username : undefined))) return { status: 'signed-out' };
     if (!backend.current.capabilities.gameActivity || !backend.current.binaryPath) return { status: 'unsupported' };
-    const account = authState.username, binary = backend.current.binaryPath;
+    const account = authState.player ?? authState.username, binary = backend.current.binaryPath;
     gameActivities.select(account, binary);
     let title:string|undefined;
     try{title=target.game?await installedTitleId(target.game.path):await catalog.gameDetails(target.productId!,market).then(details=>details?.xboxTitleId);}
     catch{return {status:'error'};}
     if (!title) return { status: 'unavailable' };
-    if (authState.running || authState.stored !== true || account !== authState.username || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
+    if (authState.running || (!authState.player && authState.stored !== true) || account !== (authState.player ?? authState.username) || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
     const activity = await gameActivities.get(title, refresh);
-    if (authState.running || authState.stored !== true || account !== authState.username || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
+    if (authState.running || (!authState.player && authState.stored !== true) || account !== (authState.player ?? authState.username) || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
     return activity;
   });
   ipcMain.handle('game-achievements', async (_event, id: unknown, refresh = false) => {
     if (typeof refresh !== 'boolean') throw Error('Invalid achievements request.');
     const target=gameDetailsTarget(id,store.games),market=currentMarket();
-    if (authState.running || authState.stored !== true || !authState.username) return { status: 'signed-out' };
+    if (authState.running || !(authState.player ?? (authState.stored === true ? authState.username : undefined))) return { status: 'signed-out' };
     if (!backend.current.capabilities.achievements || !backend.current.binaryPath) return { status: 'unsupported' };
-    const account = authState.username, binary = backend.current.binaryPath;
+    const account = authState.player ?? authState.username, binary = backend.current.binaryPath;
     gameAchievements.select(account, binary);
     let title:string|undefined;
     try{title=target.game?await installedTitleId(target.game.path):await catalog.gameDetails(target.productId!,market).then(details=>details?.xboxTitleId);}
     catch{return {status:'error'};}
     if (!title) return { status: 'unavailable' };
-    if (authState.running || authState.stored !== true || account !== authState.username || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
+    if (authState.running || (!authState.player && authState.stored !== true) || account !== (authState.player ?? authState.username) || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
     const value = await gameAchievements.get(title, refresh);
-    if (authState.running || authState.stored !== true || account !== authState.username || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
+    if (authState.running || (!authState.player && authState.stored !== true) || account !== (authState.player ?? authState.username) || binary !== backend.current.binaryPath || !target.game&&market!==currentMarket()) return { status: 'error' };
     return value;
   });
   ipcMain.handle('launch-game', (_event, id: string) => launchGame(id));
@@ -1911,38 +2462,67 @@ function registerIpc(): void {
     if (typeof patch.externalXodusRoot === 'string') allowed.externalXodusRoot = patch.externalXodusRoot.trim() ? path.resolve(patch.externalXodusRoot) : '';
     if (typeof patch.runtimeRoot === 'string') allowed.runtimeRoot = path.resolve(patch.runtimeRoot);
     if (typeof patch.verboseLogs === 'boolean') allowed.verboseLogs = patch.verboseLogs;
+    if (patch.multiAccountEnabled !== undefined) {if(typeof patch.multiAccountEnabled !== 'boolean')throw Error('Invalid account-management setting.');allowed.multiAccountEnabled=patch.multiAccountEnabled;}
+    if (patch.closeToTray !== undefined) {if(typeof patch.closeToTray !== 'boolean')throw Error('Invalid close-to-tray setting.');allowed.closeToTray=patch.closeToTray;}
     if (typeof patch.firstRunCompleted === 'boolean') allowed.firstRunCompleted = patch.firstRunCompleted;
     const previous = store.settings;
-    const settings = await store.setSettings(allowed);
-    if(Object.keys(xboxOverlayPatch(patch)).length){
-      await overlayShortcut?.configure(settings);gameGuide?.publish('overlay',xboxOverlaySettings(settings));
-      if(!xboxOverlaySettings(settings).overlayEnabled)gameGuide?.reset();
-      if(Object.keys(patch).every(key=>['overlayEnabled','overlayShortcut','overlaySide'].includes(key))){emitSnapshot();return settings;}
+    const componentKeys = ['market', 'winePath', 'externalXodusRoot', 'runtimeRoot'] as const;
+    // Do not reapply unchanged component values after an unrelated async action.
+    for (const key of componentKeys) if (allowed[key] === previous[key]) delete allowed[key];
+    const componentChange = componentKeys.some(key => allowed[key] !== undefined);
+    const reservation = componentChange ? runtime.reserveSettingsChange() : undefined;
+    try {
+      if (allowed.multiAccountEnabled === true && (previous.multiAccountEnabled !== true || savedAccountsEnabled !== true)) await requestSavedAccount('enable', '', reservation);
+      const settings = await store.setSettings(allowed);
+      if (reservation) {
+        // Settings have committed; keep component roots coherent even if a
+        // later independent tray/overlay/bandwidth side effect fails.
+        backend.setExternalRoot(settings.externalXodusRoot);
+        reservation.setRoot(settings.runtimeRoot);
+      }
+      if(patch.closeToTray!==undefined){
+        if(!launcherTray.configure(settings.closeToTray===true)){
+          await store.setSettings({closeToTray:previous.closeToTray===true});emitSnapshot();
+          throw Error('The system tray is unavailable. Use a desktop session with a system tray.');
+        }
+        if(!settings.closeToTray&&mainWindow&&!mainWindow.isVisible())await showLauncher();
+        if(Object.keys(patch).every(key=>key==='closeToTray')){emitSnapshot();return settings;}
+      }
+      if(Object.keys(xboxOverlayPatch(patch)).length){
+        await overlayShortcut?.configure(settings);gameGuide?.publish('overlay',xboxOverlaySettings(settings));
+        if(!xboxOverlaySettings(settings).overlayEnabled)gameGuide?.reset();
+        if(Object.keys(patch).every(key=>['overlayEnabled','overlayShortcut','overlaySide'].includes(key))){emitSnapshot();return settings;}
+      }
+      if (patch.downloadLimitMiB !== undefined) {
+        try { await downloadLimitControls.apply(settings.downloadLimitMiB ?? 0); }
+        catch { emitSnapshot(); throw Error('The speed limit was saved, but could not be sent to the active download. Retry the installation to apply it.'); }
+      }
+      // A bandwidth-only change must not restart authentication or refresh devices.
+      if (isBandwidthOnlyPatch(patch)) { emitSnapshot(); return settings; }
+      if (isShaderCacheOnlyPatch(patch)) { emitSnapshot(); return settings; }
+      // Cosmetic/storage preferences do not change the selected components or
+      // account scope, including a full unchanged Settings form saved by the UI.
+      if (!componentChange) { emitSnapshot(); return settings; }
+      await backend.refresh();
+      await refreshAccount(false);
+      await runtime.refresh();
+      emitSnapshot();
+      return settings;
+    } finally {
+      if (reservation) { reservation.release(); emitSnapshot(); }
     }
-    if (patch.downloadLimitMiB !== undefined) {
-      try { await downloadLimitControls.apply(settings.downloadLimitMiB ?? 0); }
-      catch { emitSnapshot(); throw Error('The speed limit was saved, but could not be sent to the active download. Retry the installation to apply it.'); }
-    }
-    // A bandwidth-only change must not restart authentication or refresh devices.
-    if (isBandwidthOnlyPatch(patch)) { emitSnapshot(); return settings; }
-    if (isShaderCacheOnlyPatch(patch)) { emitSnapshot(); return settings; }
-    // Cosmetic/storage preferences do not change the selected components or
-    // account scope, including a full unchanged Settings form saved by the UI.
-    if ((['market', 'winePath', 'externalXodusRoot', 'runtimeRoot'] as const)
-      .every(key => settings[key] === previous[key])) { emitSnapshot(); return settings; }
-    backend.setExternalRoot(settings.externalXodusRoot);
-    runtime.setRoot(settings.runtimeRoot);
-    await backend.refresh();
-    await refreshAccount(false);
-    await runtime.refresh();
-    emitSnapshot();
-    return settings;
   });
+  const assertNativeDialogs = () => {
+    if (!nativeDialogsAvailable())
+      throw Error('The file picker is unavailable in Gaming Mode. Type the path in the field, or switch to Desktop Mode, where this is easier to configure.');
+  };
   ipcMain.handle('choose-directory', async (_event, defaultPath?: string) => {
+    assertNativeDialogs();
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openDirectory', 'createDirectory'], defaultPath });
     return result.canceled ? null : result.filePaths[0];
   });
   ipcMain.handle('choose-file', async (_event, defaultPath?: string) => {
+    assertNativeDialogs();
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile'], defaultPath });
     return result.canceled ? null : result.filePaths[0];
   });
@@ -2006,6 +2586,7 @@ async function prepareFirstRunBackend(): Promise<void> {
       backend.current.updating || !backend.current.releaseAvailable || !backend.current.updateAvailable) return;
   try {
     // Uses the same checksum-verified managed installer and activity guards as Settings.
+    ensureIdle();
     await backend.update(emitSnapshot);
     if (!shutdownStarted && mainWindow?.isVisible()) void refreshInitialAccount().catch(() => {});
   } catch { /* Keep the installer error visible for an explicit retry in the wizard. */ }
@@ -2019,10 +2600,15 @@ async function createWindow(): Promise<void> {
   const demoCaptureDir = process.env.XODUS_DEMO_CAPTURE_DIR;
   if (demoCaptureDir && !demoMode) throw new Error('Demo capture requires XODUS_DEMO=1; real account data must not be captured.');
   const hiddenCapture = Boolean(smokeScreenshot || demoCaptureDir);
+  // Gamescope Gaming Mode has no desktop window manager or native menu. Use a
+  // true fullscreen window there, but never for hidden capture runs and never
+  // on a desktop session that merely carries a Steam shortcut environment.
+  const gamingMode = !hiddenCapture && process.platform === 'linux' && !nativeDialogsAvailable();
   // The compositor places unpositioned windows, which under Xwayland often
   // means the wrong monitor (see issue #5). Restore the last user placement
   // when it is still on a connected display, otherwise center on the primary.
-  const windowState = hiddenCapture ? undefined : readWindowState();
+  // Gaming Mode must not read desktop placement, and must not save over it.
+  const windowState = hiddenCapture || gamingMode ? undefined : readWindowState();
   const bounds = windowState && restoredBoundsOnScreen(windowState)
     ? windowState
     : { x: undefined as number | undefined, y: undefined as number | undefined,
@@ -2049,9 +2635,10 @@ async function createWindow(): Promise<void> {
     minWidth: Math.min(800, area.width),
     minHeight: Math.min(600, area.height),
     backgroundColor: '#080a0c',
-    title: 'Xodus Nexus',
+    title: launcherDisplayName,
     icon: fileURLToPath(new URL('../../assets/icon.png', import.meta.url)),
     autoHideMenuBar: true,
+    fullscreen: gamingMode,
     show: !hiddenCapture,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.cjs'),
@@ -2061,11 +2648,16 @@ async function createWindow(): Promise<void> {
       offscreen: hiddenCapture,
     },
   });
+  if (gamingMode) {
+    // Remove the Electron File/Edit menu and its Alt accelerator entirely.
+    mainWindow.setMenu(null);
+    mainWindow.setMenuBarVisibility(false);
+  }
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => console.error('Renderer load failed', code, description));
   mainWindow.webContents.on('render-process-gone', (_event, details) => console.error('Renderer process exited', details.reason));
   if (smokeScreenshot) mainWindow.webContents.on('console-message', (_event, level, message) => console.error(`Renderer console [${level}]`, message));
   if (!hiddenCapture) mainWindow.once('ready-to-show', () => mainWindow?.show());
-  if (!hiddenCapture) {
+  if (!hiddenCapture && !gamingMode) {
     if (windowState?.maximized || tooLarge) mainWindow.maximize();
     mainWindow.on('close', () => { if (mainWindow) saveWindowState(mainWindow); });
   }
@@ -2073,6 +2665,7 @@ async function createWindow(): Promise<void> {
   mainWindow.on('blur',restoreOverlayShortcut);
   mainWindow.on('closed',restoreOverlayShortcut);
   mainWindow.webContents.on('render-process-gone',restoreOverlayShortcut);
+  mainWindow.on('close',event=>{if(mainWindow)launcherTray.close(event,()=>mainWindow?.hide());});
   mainWindow.on('closed', () => { mainWindow = null; finishShortcutSession(); });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void openDesktopTarget(url, () => shell.openExternal(url))
@@ -2164,6 +2757,7 @@ app.whenReady().then(async () => {
   shortcutOnly = Boolean(startupRequest.gameId) && !demoMode;
   store = new StateStore(app.getPath('userData'));
   await store.load();
+  launcherTray.configure(store.settings.closeToTray === true);
   xboxParty=new XboxParty(nativeSocialConnection);
   xboxInvites=new XboxInvites(nativeSocialConnection);
   voiceHost=new XboxVoiceHost(__dirname,{
@@ -2180,7 +2774,7 @@ app.whenReady().then(async () => {
   nativeSocialShutdown.push(async()=>{clearInterval(partyInvitesTimer);await voiceHost.shutdown();});
 
   downloadCleanup = new DownloadCleanup(app.getPath('userData'));
-  accountProfile = new AccountProfile(app.getPath('userData'), scheduleSnapshot, dataUrl => {
+  const normalizeAvatar = (dataUrl: string): string | undefined => {
     try {
       const picture = nativeImage.createFromDataURL(dataUrl);
       if (picture.isEmpty()) return;
@@ -2189,7 +2783,9 @@ app.whenReady().then(async () => {
       const scale = Math.min(1, 256 / Math.max(width, height));
       return picture.resize({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), quality: 'best' }).toDataURL();
     } catch { return undefined; }
-  });
+  };
+  accountProfile = new AccountProfile(app.getPath('userData'), scheduleSnapshot, normalizeAvatar);
+  licenseProfile = new AccountProfile(app.getPath('userData'), scheduleSnapshot, normalizeAvatar, undefined, true);
   launcherUpdater = new LauncherUpdater(app.getVersion(), app.isPackaged ? process.env.APPIMAGE : undefined, app.getPath('userData'), scheduleSnapshot);
   await launcherUpdater.initialize();
   const dataHome = process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME)
@@ -2216,10 +2812,10 @@ app.whenReady().then(async () => {
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
     return;
   }
-  for (const game of [...store.games]) {
-    try {
-      const inspected = await inspectGameDirectory(game.path);
-      await store.patchGame(game.id, {
+  const inspectedGames: { id: string; patch: Partial<Game> }[] = [];
+  for (const { game, inspected } of await inspectStartupLibrary(store.games, inspectGameDirectory)) {
+    if (inspected) {
+      inspectedGames.push({ id: game.id, patch: {
         installState: inspected.installState,
         installMessage: inspected.installMessage,
         updateIncomplete: inspected.updateIncomplete,
@@ -2230,16 +2826,18 @@ app.whenReady().then(async () => {
         storeId: inspected.storeId ?? game.storeId,
         installedVersion: inspected.installedVersion,
         packageName: inspected.packageName,
-      });
-    } catch {
+      } });
+    } else {
       await refreshIncompleteUpdate(game).catch(() => {});
       // Keep unavailable entries visible, without clearing any update barrier.
     }
   }
-  runtime = new RuntimeManager(store.settings.runtimeRoot, emitLog, () => downloadCancellations.size > 0 || operations.size > 0 || installQueue.size > 0 || preparingInstall || backend?.current.updating === true);
-  backend = new BackendManager(app.getPath('userData'), store.settings.externalXodusRoot, emitLog, () => keyringSupport.busy || downloadCancellations.size > 0 || operations.size > 0 || installQueue.size > 0 || preparingInstall || runtime?.current.updating === true);
+  await store.patchGames(inspectedGames);
+  runtime = new RuntimeManager(store.settings.runtimeRoot, emitLog, () => componentActivityRunning() || backend?.current.updating === true || launcherUpdater?.busy === true, fetch, process.arch, () => ({launcher:app.getVersion(),backend:backend?.current.version??'0.0.0'}), emitSnapshot);
+  backend = new BackendManager(app.getPath('userData'), store.settings.externalXodusRoot, emitLog, () => componentActivityRunning() || runtime?.busy === true || launcherUpdater?.busy === true);
   await backend.refresh();
   await runtime.refresh();
+  componentUpdates = new ComponentUpdates(componentUpdateAdmission,prepareComponentUpdates,emitSnapshot,()=>launcherUpdater.state.restartRequired===true,()=>JSON.stringify([store.settings.runtimeRoot,authState.username??null,authState.player??null,authState.stored??null,store.settings.market]));
   if (!demoMode) {
     // Reachability of Microsoft's sign-in hosts, kept current for the header
     // and consulted before a launch so offline play starts without waiting
@@ -2274,7 +2872,7 @@ app.whenReady().then(async () => {
     const text=(index:number)=>{const value=args[index];if(typeof value!=='string')throw Error('Invalid Guide request.');return value;};
     switch(method){
      case 'getXboxPlayerDetails':return xboxNativeSocial.details(text(0));
-     case 'getXboxPlayerGames':return xboxNativeSocial.games(text(0));
+     case 'getXboxPlayerGames':return xboxProfileGames(text(0));
      case 'getXboxPeople':return xboxNativeSocial.people(text(0) as Parameters<NativeXboxSocial['people']>[0],args[1]===undefined||args[1]===null?undefined:text(1));
      case 'getXboxRelationship':return xboxNativeSocial.relationship(text(0));
      case 'changeXboxRelationship':if(text(0)!=='current')throw Error('Xbox account changed.');return xboxNativeSocial.changeRelationship(nativeSocialConnection()!.account,text(1),text(2) as Parameters<NativeXboxSocial['changeRelationship']>[2]);
@@ -2306,17 +2904,22 @@ app.whenReady().then(async () => {
    await overlayShortcut.configure(store.settings);
   }
   // No external toggle socket or compositor scripts are installed automatically.
-  launchReady = true;
   if (startupRequest.gameId) {
     await prepareSystemWallet();
     await refreshAccount(false);
-    receiveLaunchRequest(startupRequest.gameId);
-  } else await showBeforeAccountCheck(showLauncher, refreshInitialAccount, () => {
-    if (shutdownStarted || authState.running || authState.lastResult === 'success') return;
-    authState = { ...authState, note: 'Account status is unavailable. Check the system keyring in Settings, then refresh.' };
-    emitSnapshot();
-  });
-  for (const id of pendingRequests.splice(0)) receiveLaunchRequest(id);
+    // Only now: the account refresh resets the party, whose idle event would
+    // otherwise end a shortcut session before its launch is registered.
+    launchReady = true;
+    receiveLaunchRequest({ gameId: startupRequest.gameId });
+  } else {
+    launchReady = true;
+    await showBeforeAccountCheck(showLauncher, refreshInitialAccount, () => {
+      if (shutdownStarted || authState.running || authState.lastResult === 'success') return;
+      authState = { ...authState, note: 'Account status is unavailable. Check the system keyring in Settings, then refresh.' };
+      emitSnapshot();
+    });
+  }
+  for (const request of pendingRequests.splice(0)) receiveLaunchRequest(request);
   for (const error of pendingShortcutErrors.splice(0)) void shortcutError(error);
   app.on('activate', () => { void showLauncher(); });
 }).catch((error) => {
@@ -2329,9 +2932,14 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && !shortcutOnly) app.quit();
 });
 
-app.on('will-quit', () => {gameDisplay.stop();});
+app.on('will-quit', () => {
+  gameDisplay.stop(); steamOffer?.close();
+  for (const lease of steamLeases) lease.close();
+});
 
 app.on('before-quit', (event) => {
+  if (!primaryInstance) return;
+  launcherTray.quit();
   connectivity?.stop();
   xboxSocial.close();
   walletUnlocker.cancel();
@@ -2339,6 +2947,7 @@ app.on('before-quit', (event) => {
   installQueue.stop();
   accountLibrary.reset();
   accountProfile?.cancel();
+  licenseProfile?.cancel();
   accountRefresh.invalidate();
   if (shutdownStarted || (!xboxNativeSocial && nativeSocialShutdown.length===0 && !xboxSocial.busy && !walletUnlocker.busy && !backendDiagnostics?.pendingWrites && !authJob && !preparingInstall && downloadCancellations.size === 0 && installQueue.size === 0 && operations.size === 0 && serviceSessions.size === 0 && gameInviteBridges.size === 0 && !checkingGameUpdates && !launcherUpdater?.state.updating)) return;
   event.preventDefault();

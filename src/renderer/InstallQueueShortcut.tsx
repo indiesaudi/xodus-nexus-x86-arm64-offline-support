@@ -43,7 +43,7 @@ export function QueuePreview({ tasks, games }: { tasks: readonly DownloadTask[];
       const total = Number.isFinite(task.totalBytes) && task.totalBytes! > 0 ? task.totalBytes : undefined;
       return <li className={`queue-preview-item ${task.status}`} key={task.id}>
         <Artwork cover={coverFor(task, games)} />
-        <div className="queue-preview-main"><strong title={task.title}>{task.title}</strong>
+        <div className="queue-preview-main"><strong data-tooltip={task.title}>{task.title}</strong>
           <small>{total !== undefined ? `${current !== undefined ? size(current) : ui("ui.size_pending_aedf846")} / ${size(total)}`
             : current !== undefined ? ui("ui.downloaded_6d09ba2", { size: size(current) }) : task.status === 'queued' ? ui("ui.waiting_to_start_f5e5f81") : ui("ui.size_not_reported_yet_0686eec")}</small>
           <Progress task={task} />
@@ -80,7 +80,7 @@ export function InstallQueueShortcut({ downloads, games, active, openQueue }: {
       aria-expanded={tasks.length ? visible : undefined} aria-controls={visible ? panelId : undefined} onClick={navigate}>
       {current ? <Artwork cover={coverFor(current, games)} /> : <Download />}
       <div className="queue-summary-copy"><strong>{label}</strong>
-        <small title={current?.title}>{current?.title ?? ui("ui.manage_installations_88e169c")}</small>
+        <small data-tooltip={current?.title}>{current?.title ?? ui("ui.manage_installations_88e169c")}</small>
         {current ? <Progress task={current} /> : null}</div>
     </button>
     {visible ? <div className="queue-preview" id={panelId} role="region" aria-label={ui("ui.installation_progress_9b70263")}>

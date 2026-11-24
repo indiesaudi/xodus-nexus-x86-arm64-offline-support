@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnTracked } from './process.js';
 import { backendDiagnostic } from './backend-diagnostics.js';
 import { sessionFailureMessage } from './session-errors.js';
-import type { AccountLibraryPage, CatalogProduct } from '../shared/types.js';
+import type { AccountLibraryPage, CatalogProduct, StoreAccess } from '../shared/types.js';
 
 interface Entitlement {
   productId: string; status: string; isTrial: boolean; sharingSource: string;
@@ -118,7 +118,7 @@ export class AccountLibrary {
   }
   private async load(cursor?: string, refresh = false): Promise<NonNullable<AccountLibrary['cached']>> {
     const identity = this.identity;
-    if (!identity) throw Error('Sign in and update the Xodus backend to load account games.');
+    if (!identity) throw Error('Sign in and update the Nexus backend to load account games.');
     if (refresh) { this.reset(); cursor = undefined; }
     const generation = this.generation;
     const current = () => { if (generation !== this.generation) throw Error('Account library changed. Refresh this page.'); };
@@ -163,6 +163,32 @@ export class AccountLibrary {
     }
     return accessByProductId;
   }
+  /**
+   * Owned access for a launch's DLC hints. Starts loading the library now when
+   * no fresh copy is cached (the launch prepares meanwhile); the returned read
+   * waits at most `waitMs` for that load and otherwise answers from the cache,
+   * leaving the load to finish for the next launch. Never throws.
+   */
+  startLaunchAccess(): (waitMs: number) => Promise<AccountLibraryPage['accessByProductId']> {
+    const identity = this.identity, generation = this.generation;
+    const current = () => identity === this.identity && generation === this.generation;
+    const cachedAccess = () => current() ? this.peekAccess() : {};
+    // A launch reader belongs to this selection, including the signed-out
+    // selection. Never adopt another account's cache after a reset or switch.
+    if (!identity || (this.cached && this.cached.until > Date.now())) return async () => cachedAccess();
+    const loaded = this.access().then(() => undefined, () => undefined);
+    return async (waitMs) => {
+      if (!current()) return {};
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<undefined>(resolve => { timer = setTimeout(resolve, waitMs, undefined); });
+      try {
+        await Promise.race([loaded, timeout]);
+        // Preparation can outlive the cache or a license. Re-evaluate access
+        // now instead of retaining the map returned by the original load.
+        return cachedAccess();
+      } finally { clearTimeout(timer); }
+    };
+  }
   async access(refresh = false): Promise<{ checkedAt: string; accessByProductId: AccountLibraryPage['accessByProductId'] }> {
     const cached = await this.load(undefined, refresh);
     if (cached !== this.cached || !this.identity) throw Error('Account library changed. Refresh this page.');
@@ -172,6 +198,33 @@ export class AccountLibrary {
       if (access) accessByProductId[product] = access;
     }
     return { checkedAt: cached.checkedAt, accessByProductId };
+  }
+  /** `scope` derives bundle membership for the requested products from public
+   * metadata. It runs inside this account snapshot and is re-validated after. */
+  async storeAccess(configuredMarket=this.identity?.market??'US', scope?: (access: StoreAccess, requested: string[]) => Promise<StoreAccess>, requested: string[] = []): Promise<StoreAccess> {
+    const identity=this.identity,generation=this.generation;
+    if(!identity)throw Error('Sign in before checking Store access.');
+    const cached=await this.load();
+    const now=Date.now();
+    const accessByProductId:StoreAccess['accessByProductId']={};
+    for(const product of cached.entries.keys()){const kind=entitlementKind(product,cached.entries,now);if(kind)accessByProductId[product]=kind;}
+    if(generation!==this.generation||identity!==this.identity||cached!==this.cached)throw Error('Account library changed. Refresh this page.');
+    // Conservative across all known graph rows, including subscription parents.
+    // This may refresh early, never beyond a known entitlement expiration.
+    let until=cached.until;
+    for(const row of cached.entries.values()){
+      const end=Date.parse(row.endDate);
+      if(row.status==='Active'&&!row.isTrial&&end>now)until=Math.min(until,end);
+    }
+    if(until<=Date.now())throw Error('Store access expired. Refresh this page.');
+    const result: StoreAccess = {configuredMarket,account:identity.account,market:identity.market,checkedAt:cached.checkedAt,accessByProductId,backend:identity.binary,expiresAt:new Date(until).toISOString()};
+    if(!scope||!requested.length)return result;
+    const scoped=await scope(structuredClone(result),requested);
+    // The same captured snapshot must still be current: a reset, account/backend
+    // switch (including A to B to A) or expiry during the graph refuses the result.
+    if(generation!==this.generation||identity!==this.identity||cached!==this.cached||Date.now()>=until)
+      throw Error('Store access expired or the account changed. Refresh account access.');
+    return scoped;
   }
   async get(kind: Kind, cursor?: string, refresh = false, sort?: AccountLibraryPage['sort']): Promise<AccountLibraryPage> {
     if (kind !== 'all' && kind !== 'owned' && kind !== 'gamepass' && kind !== 'other') throw Error('Invalid library filter.');

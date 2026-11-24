@@ -7,6 +7,15 @@ export function fallbackAuthViewFactory(embedded: (requestBrowser: () => Promise
     let frame: Extract<AuthFrame, { type: 'open' }> | undefined;
     let disposed = false, generation = 0, usingBrowser = false;
     let switching: Promise<void> | undefined;
+    // Retiring a generation releases operations still waiting on the old view,
+    // such as a destroyed webview's loadURL or executeJavaScript promise.
+    let releaseRetired!: () => void;
+    let retired = new Promise<void>(resolve => { releaseRetired = resolve; });
+    const retireGeneration = () => {
+      generation++;
+      releaseRetired();
+      retired = new Promise<void>(resolve => { releaseRetired = resolve; });
+    };
     const create = (factory: AuthViewFactory) => {
       const own = generation;
       const current = () => !disposed && generation === own;
@@ -20,7 +29,7 @@ export function fallbackAuthViewFactory(embedded: (requestBrowser: () => Promise
       const factory = await browser();
       if (disposed || usingBrowser || switching || frame !== active || generation !== own) return;
       switching = (async () => {
-        generation++; // Invalidate all events from the old window before destroying it.
+        retireGeneration(); // Invalidate and release everything waiting on the old window before destroying it.
         await view.dispose();
         if (disposed) return;
         usingBrowser = true;
@@ -34,16 +43,16 @@ export function fallbackAuthViewFactory(embedded: (requestBrowser: () => Promise
     return {
       async open(value) {
         await switching; if (disposed) return; frame = value;
-        const own = generation, current = view;
-        try { await current.open(value); } catch (error) { if (!disposed && generation === own) throw error; }
+        const own = generation, current = view, cancelled = retired;
+        try { await Promise.race([current.open(value), cancelled]); } catch (error) { if (!disposed && generation === own) throw error; }
       },
       close(id) { if (frame?.session === id) { frame = undefined; view.close(id); } },
       async context(id, context) {
         await switching; if (disposed || frame?.session !== id) return;
-        const own = generation, current = view;
-        try { await current.context(id, context); } catch (error) { if (!disposed && generation === own) throw error; }
+        const own = generation, current = view, cancelled = retired;
+        try { await Promise.race([current.context(id, context), cancelled]); } catch (error) { if (!disposed && generation === own) throw error; }
       },
-      async dispose() { if (disposed) return; disposed = true; generation++; frame = undefined; await view.dispose(); await switching?.catch(() => {}); },
+      async dispose() { if (disposed) return; disposed = true; retireGeneration(); frame = undefined; await view.dispose(); await switching?.catch(() => {}); },
     };
   };
 }

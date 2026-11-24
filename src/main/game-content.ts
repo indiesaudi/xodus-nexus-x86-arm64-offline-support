@@ -16,7 +16,7 @@ export interface ContentPackage { productId: string; contentId: string; family: 
 type Access = Record<string, LibraryAccess>;
 type RecordValue = Record<string, any>;
 
-async function boundedFile(file: string): Promise<string> {
+async function boundedBytes(file: string): Promise<Buffer> {
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
@@ -24,13 +24,170 @@ async function boundedFile(file: string): Promise<string> {
     const bytes = Buffer.alloc(stat.size + 1);
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
     if (bytesRead > stat.size) throw Error('Package metadata changed while reading.');
-    return bytes.subarray(0, bytesRead).toString('utf8');
+    return bytes.subarray(0, bytesRead);
   } finally { await handle.close(); }
+}
+async function boundedFile(file: string): Promise<string> {
+  return (await boundedBytes(file)).toString('utf8');
 }
 async function manifestFile(directory: string, filename: string): Promise<string> {
   const matches = (await fs.readdir(directory)).filter(name => name.toLowerCase() === filename.toLowerCase());
   if (matches.length !== 1) throw Error(`Missing or ambiguous ${filename}.`);
   return boundedFile(path.join(directory, matches[0]));
+}
+interface ContentConfiguration { xml: string; bytes: Buffer; source?: string; root?: string }
+async function contentConfiguration(directory: string): Promise<ContentConfiguration> {
+  const names = await fs.readdir(directory);
+  const roots = names.filter(name => name.toLowerCase() === 'microsoftgame.config');
+  const sources = names.filter(name => name.toLowerCase() === 'src');
+  if (roots.length > 1 || sources.length > 1) throw Error('Missing or ambiguous MicrosoftGame.config.');
+  const root = roots[0] && path.join(directory, roots[0]);
+  let source: string | undefined;
+  if (sources.length) {
+    const folder = path.join(directory, sources[0]);
+    const stat = await fs.lstat(folder);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('Content SRC path is not a real directory.');
+    const files = (await fs.readdir(folder)).filter(name => name.toLowerCase() === 'microsoftgame.config');
+    if (files.length > 1) throw Error('Missing or ambiguous MicrosoftGame.config.');
+    if (files.length) source = path.join(folder, files[0]);
+  }
+  if (!root && !source) throw Error('Missing or ambiguous MicrosoftGame.config.');
+  const bytes = await boundedBytes(source ?? root!);
+  if (source && root && !(await boundedBytes(root)).equals(bytes)) throw Error('Conflicting root and SRC MicrosoftGame.config.');
+  return { xml: bytes.toString('utf8'), bytes, source, root };
+}
+function contentPattern(pattern: string): RegExp {
+  return new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.') + '$', 'i');
+}
+type LayoutCoordinate = 'source' | 'destination';
+/** An absolute Windows drive or UNC SourcePath is build-host metadata. It is
+ * never opened, joined or stored as a package path; the group can then only be
+ * validated at its destination coordinate. */
+type LayoutSource = { usable: true; parts: string[] } | { usable: false };
+interface FileGroupLayout {
+  group: XmlNode;
+  source: LayoutSource; destination: string[]; prefix: string[]; pattern: string;
+}
+/**
+ * Package layout paths are relative to the package root. A single leading
+ * separator still denotes that package root, never the host filesystem or a
+ * network share, so it is normalized away instead of being opened as `/SRC`.
+ */
+function layoutParts(value: string, optional = false): string[] {
+  if (!optional && !value) throw Error('Unsupported content layout path.');
+  if (/^[\\/]{2}/.test(value) || /[:\x00-\x1f]/.test(value)) throw Error('Unsupported content layout path.');
+  const parts = value.split(/[\\/]+/).filter(part => part && part !== '.');
+  if (parts.some(part => part === '..')) throw Error('Unsupported content layout path.');
+  return parts;
+}
+function layoutSource(value: string): LayoutSource {
+  if (!value) throw Error('Unsupported content layout path.');
+  if (/[\x00-\x1f]/.test(value)) throw Error('Unsupported content layout path.');
+  if (/[*?]/.test(value)) throw Error('Unsupported content layout wildcard.');
+  // Only absolute Windows drives and UNC hosts are build metadata. A
+  // drive-relative D:path is neither a package path nor an absolute host path.
+  if (/^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]/.test(value)) return { usable: false };
+  return { usable: true, parts: layoutParts(value) };
+}
+function layoutGroups(groups: XmlNode[]): FileGroupLayout[] {
+  return groups.map(group => {
+    const source = layoutSource(group.attributes.SourcePath ?? '');
+    const destinationValue = group.attributes.DestinationPath;
+    const include = layoutParts(group.attributes.Include ?? '');
+    const destination = layoutParts(destinationValue ?? '', true);
+    const pattern = include.at(-1), prefix = include.slice(0, -1);
+    // A relative source can keep the legacy implied-root destination. A build
+    // host source may only be used when the package proves its destination.
+    if (!source.usable && (destinationValue === undefined || destinationValue === ''))
+      throw Error('Host build source requires an explicit destination path.');
+    if (!pattern || prefix.some(part => /[*?]/.test(part)) || destination.some(part => /[*?]/.test(part)))
+      throw Error('Unsupported content layout wildcard.');
+    return { group, source, destination, prefix, pattern };
+  });
+}
+function layoutExcluded(layout: FileGroupLayout, relative: string[]): boolean {
+  const exclude = layout.group.attributes.Exclude;
+  if (!exclude) return false;
+  const parts = layoutParts(exclude);
+  return parts.length === relative.length && parts.every((part, index) => contentPattern(part).test(relative[index]));
+}
+function sameLayoutPath(expected: string[], actual: string[]): boolean {
+  return expected.length === actual.length && expected.every((part, index) => part.toLowerCase() === actual[index].toLowerCase());
+}
+async function layoutPayload(directory: string, layout: FileGroupLayout, coordinate: LayoutCoordinate): Promise<'ok' | 'missing' | 'ambiguous' | 'unsafe'> {
+  const leading = coordinate === 'source' ? (layout.source.usable ? layout.source.parts : undefined) : layout.destination;
+  if (!leading) return 'missing';
+  let folder = directory;
+  for (const part of [...leading, ...layout.prefix]) {
+    const matches = (await fs.readdir(folder)).filter(name => name.toLowerCase() === part.toLowerCase());
+    if (!matches.length) return 'missing';
+    if (matches.length > 1) return 'ambiguous';
+    folder = path.join(folder, matches[0]);
+    const stat = await fs.lstat(folder);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unsafe';
+  }
+  const names = await fs.readdir(folder);
+  if (names.length > 4096) throw Error('Content payload directory limit exceeded.');
+  const pattern = contentPattern(layout.pattern);
+  for (const name of names.filter(name => pattern.test(name) && !layoutExcluded(layout, [...layout.prefix, name])))
+    if ((await fs.lstat(path.join(folder, name))).isFile()) return 'ok';
+  return 'missing';
+}
+/**
+ * Every declared group must resolve under the same coordinate; groups are never
+ * mixed. Returns the reported failure instead of throwing so that coordinate
+ * selection can compare whole-layout evidence first.
+ */
+async function layoutFailure(directory: string, layouts: FileGroupLayout[], coordinate: LayoutCoordinate): Promise<string | undefined> {
+  for (const layout of layouts) {
+    const result = await layoutPayload(directory, layout, coordinate);
+    if (result === 'ambiguous') return 'Missing or ambiguous content payload directory.';
+    if (result === 'unsafe') return 'Invalid content payload directory.';
+    if (result !== 'ok') return 'A file group declared by the content layout is missing.';
+  }
+  return undefined;
+}
+/**
+ * A downloaded tree can be extracted at either layout coordinate. The metadata
+ * copy that exists is authoritative (SRC when present, otherwise the root copy),
+ * and the whole layout must agree on one interpretation. Source-coordinate trees
+ * are deployable only when the metadata's declared destination is the package
+ * root that runtime discovery reads; destination-coordinate trees already sit at
+ * their deployment paths, including a package-relative \SRC.
+ *
+ * The metadata declaration alone can be coordinate-neutral (a source path equal
+ * to the deployed path), while the payload groups differ, so a neutral
+ * declaration is settled by whole-layout evidence. Two fully valid but distinct
+ * interpretations stay ambiguous and are rejected. A build-host source is never
+ * evidence: such a group can only be satisfied by its destination coordinate.
+ */
+async function layoutCoordinate(directory: string, layouts: FileGroupLayout[], configuration: ContentConfiguration): Promise<LayoutCoordinate> {
+  const configName = 'MicrosoftGame.config';
+  const physical = path.relative(directory, (configuration.source ?? configuration.root)!).split(path.sep).filter(Boolean);
+  const sourcePath = (group: FileGroupLayout, relative: string[]) => group.source.usable ? [...group.source.parts, ...relative] : undefined;
+  const declarations = layouts.filter(group => {
+    if (!contentPattern(group.pattern).test(configName)) return false;
+    const relative = [...group.prefix, configName], source = sourcePath(group, relative);
+    return ((source !== undefined && sameLayoutPath(source, physical)) || sameLayoutPath([...group.destination, ...relative], physical))
+      && !layoutExcluded(group, relative);
+  });
+  if (declarations.length !== 1) throw Error('MicrosoftGame.config must be unambiguously mapped by the content layout.');
+  const declaration = declarations[0], relative = [...declaration.prefix, configName];
+  const measuredSource = sourcePath(declaration, relative), destinationPath = [...declaration.destination, ...relative];
+  const sourceCoordinate = measuredSource !== undefined && sameLayoutPath(measuredSource, physical) && sameLayoutPath(destinationPath, [configName]);
+  const destinationCoordinate = sameLayoutPath(destinationPath, physical);
+  if (sourceCoordinate && destinationCoordinate) {
+    if (layouts.every(layout => layout.source.usable && sameLayoutPath(layout.source.parts, layout.destination))) return 'source';
+    const sourceFailure = await layoutFailure(directory, layouts, 'source');
+    const destinationFailure = await layoutFailure(directory, layouts, 'destination');
+    if (!sourceFailure && !destinationFailure) throw Error('MicrosoftGame.config matches both layout coordinates.');
+    if (!sourceFailure) return 'source';
+    if (!destinationFailure) return 'destination';
+    throw Error(sourceFailure);
+  }
+  if (sourceCoordinate) return 'source';
+  if (destinationCoordinate) return 'destination';
+  throw Error('MicrosoftGame.config is not at a layout-declared location.');
 }
 export function contentManifest(xml: string): Manifest {
   const root = parsePackageXml(xml);
@@ -83,17 +240,23 @@ export function contentOffers(base: Manifest, catalog: unknown, access: Access, 
     const product = byId.get(id);
     const title = product?.LocalizedProperties?.find((row: RecordValue) => typeof row?.ProductTitle === 'string')?.ProductTitle?.slice(0, 300) || id;
     const licensed = access[id];
+    const skus = contentSkus(product ?? {});
+    const bundled = product?.ProductType === 'Durable' && skus.some(props => Array.isArray(props.BundledSkus) && props.BundledSkus.length);
+    const licenseOnly = product?.ProductType === 'Durable' && skus.length && skus.every(props => (props.PackagesDeclared ?? Object.hasOwn(props, 'Packages'))
+      && (props.Packages === null || Array.isArray(props.Packages) && props.Packages.length === 0));
     if (!licensed) {
       const pkg = verify.includes(id) ? packageChoice(base, baseProduct, product) : undefined;
       if (pkg) { selected.push(pkg); return { productId: id, title, status: 'verify', downloadBytes: pkg.downloadBytes,
         note: 'Included in an active offer. Xodus must verify this add-on license before downloading.' }; }
+      if (verify.includes(id) && bundled)
+        return { productId: id, title, status: 'bundle', note: 'Included in an active offer. Its related add-ons are listed separately.' };
+      if (verify.includes(id) && licenseOnly)
+        return { productId: id, title, status: 'license-only', note: 'Included in an active offer. No download is required; the game must verify this license through the runtime.' };
       return { productId: id, title, status: 'unlicensed', note: 'No active account license was verified.' };
     }
-    const skus = contentSkus(product ?? {});
-    if (product?.ProductType === 'Durable' && skus.some(props => Array.isArray(props.BundledSkus) && props.BundledSkus.length))
+    if (bundled)
       return { productId: id, title, access: licensed, status: 'bundle', note: 'Content bundle. Its related add-ons are listed separately.' };
-    if (product?.ProductType === 'Durable' && skus.length && skus.every(props => (props.PackagesDeclared ?? Object.hasOwn(props, 'Packages'))
-      && (props.Packages === null || Array.isArray(props.Packages) && props.Packages.length === 0)))
+    if (licenseOnly)
       return { productId: id, title, access: licensed, status: 'license-only', note: 'No download required. The game must verify this license through the runtime.' };
     const pkg = packageChoice(base, baseProduct, product);
     if (!pkg) return { productId: id, title, access: licensed, status: 'unsupported', note: 'No unambiguous related PC MSIXVC content package was verified.' };
@@ -106,12 +269,30 @@ export function contentOffers(base: Manifest, catalog: unknown, access: Access, 
 export class GameContent {
   private catalog: ContentCatalog;
   constructor(private dataRoot: string, fetcher: typeof fetch = fetch) { this.catalog = new ContentCatalog(fetcher); }
-  /** Public discovery hints only. Never reads credentials or grants runtime rights. */
-  async relatedProducts(game: Game, access: Access, market = 'US', signal = AbortSignal.timeout(5_000)): Promise<string[]> {
+  /**
+   * Public discovery hints only. Never reads credentials or grants runtime rights.
+   * Optional catalog failures retain package-declared and validated installed
+   * IDs, so an outage cannot remove installed DLC from runtime receipt queries.
+   * Installation/repair still requires fresh catalog admission in plan/prepare.
+   * Offline launches list only installed content and never query the network.
+   */
+  async relatedProducts(game: Game, access: Access, market = 'US', signal?: AbortSignal, offline = false): Promise<string[]> {
+    signal?.throwIfAborted();
     const base = await baseManifest(game);
-    const catalog = await this.catalog.discover(base, access, market, game.offerProductId, signal);
-    signal.throwIfAborted();
-    const related = [...new Set([...catalog.related, ...await this.installedIds(game)])].filter(id => id !== base.storeId);
+    let discovered = offline ? [] : base.related;
+    if (!offline) {
+      try {
+        const catalog = await this.catalog.discover(base, access, market, game.offerProductId, signal ?? AbortSignal.timeout(5_000));
+        discovered = catalog.related;
+      } catch {
+        // A caller cancellation must propagate. The optional launch lookup's
+        // own deadline/network failure can fall back to local metadata.
+        signal?.throwIfAborted();
+      }
+    }
+    signal?.throwIfAborted();
+    const related = [...new Set([...discovered, ...await this.installedIds(game)])].filter(id => id !== base.storeId);
+    signal?.throwIfAborted();
     if (related.length > 256 || related.some(id => !productId.test(id))) throw Error('Content discovery scope is too large.');
     return related;
   }
@@ -135,9 +316,10 @@ export class GameContent {
     if (/[;\r\n]/.test(current)) throw Error('Content paths cannot contain semicolons or line breaks.');
     return current;
   }
-  private async validate(game: Game, id: string, directory: string, family?: string): Promise<Manifest> {
+  private async validate(game: Game, id: string, directory: string, family?: string): Promise<Manifest & { configuration: ContentConfiguration }> {
     const base = await baseManifest(game);
-    const content = contentManifest(await manifestFile(directory, 'MicrosoftGame.config'));
+    const configuration = await contentConfiguration(directory);
+    const content = contentManifest(configuration.xml);
     const appx = parsePackageXml(await manifestFile(directory, 'appxmanifest.xml'));
     const identity = single(appx, 'Identity').attributes;
     const dependency = single(single(appx, 'Dependencies'), 'MainPackageDependency').attributes;
@@ -156,28 +338,11 @@ export class GameContent {
     }
     visit(layout, 0);
     if (!groups.length || groups.length > 256) throw Error('Content layout contains no supported file groups.');
-    for (const group of groups) {
-      const source = group.attributes.SourcePath, include = group.attributes.Include;
-      const valid = (value: string | undefined) => value && !/^[/\\]/.test(value) && !/[:\x00-\x1f]/.test(value) && !value.split(/[/\\]/).includes('..');
-      if (!valid(source) || !valid(include) || /[*?]/.test(source)) throw Error('Unsupported content layout path.');
-      const parts = [...source.split(/[/\\]/), ...include.split(/[/\\]/)].filter(part => part && part !== '.');
-      const pattern = parts.pop();
-      if (!pattern || parts.some(part => /[*?]/.test(part))) throw Error('Unsupported content layout wildcard.');
-      let folder = directory;
-      for (const part of parts) {
-        const matches = (await fs.readdir(folder)).filter(name => name.toLowerCase() === part.toLowerCase());
-        if (matches.length !== 1) throw Error('Missing or ambiguous content payload directory.');
-        folder = path.join(folder, matches[0]);
-        if (!(await fs.lstat(folder)).isDirectory()) throw Error('Invalid content payload directory.');
-      }
-      const match = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.') + '$', 'i');
-      const names = await fs.readdir(folder);
-      if (names.length > 4096) throw Error('Content payload directory limit exceeded.');
-      let found = false;
-      for (const name of names.filter(name => match.test(name))) if ((await fs.lstat(path.join(folder, name))).isFile()) { found = true; break; }
-      if (!found) throw Error('A file group declared by the content layout is missing.');
-    }
-    return content;
+    const fileGroups = layoutGroups(groups);
+    const coordinate = await layoutCoordinate(directory, fileGroups, configuration);
+    const failure = await layoutFailure(directory, fileGroups, coordinate);
+    if (failure) throw Error(failure);
+    return { ...content, configuration };
   }
   async plan(game: Game, readAccess: () => Promise<{ checkedAt: string; accessByProductId: Access }>, market = 'US'): Promise<{ plan: GameContentPlan; packages: ContentPackage[] }> {
     const base = await baseManifest(game);
@@ -207,6 +372,14 @@ export class GameContent {
   async complete(game: Game, pkg: ContentPackage): Promise<void> {
     const directory = await this.safeDirectory(game, pkg.productId);
     const content = await this.validate(game, pkg.productId, directory, pkg.family);
+    if (!content.configuration.root) {
+      // Runtime discovery expects root metadata. Materialize only the exact
+      // layout-declared, fully validated config, preserving its original copy.
+      if (!(await boundedBytes(content.configuration.source!)).equals(content.configuration.bytes))
+        throw Error('Content configuration changed during installation.');
+      await fs.writeFile(path.join(directory, 'MicrosoftGame.config'), content.configuration.bytes, { flag: 'wx', mode: 0o600 });
+      await this.validate(game, pkg.productId, directory, pkg.family);
+    }
     const temporary = path.join(directory, markerName + '.' + randomUUID() + '.tmp');
     await fs.writeFile(temporary, JSON.stringify({ schema: 1, productId: pkg.productId, contentId: pkg.contentId, parent: game.storeId, name: content.name, version: content.version }), { mode: 0o600, flag: 'wx' });
     await fs.rename(temporary, path.join(directory, markerName));

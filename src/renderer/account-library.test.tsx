@@ -18,7 +18,7 @@ it('offers the explicit recent PC Game Pass order only within the Game Pass acce
 
 it('offers a configurable four-GiB driver shader cache limit with a separate save action',()=>{
   const data=demoSnapshot();let html=renderToStaticMarkup(<SettingsPage data={data} toast={()=>{}} />);
-  expect(html).toContain('Driver cache limit (GiB)');expect(html).toContain('Default: 4 GiB');expect(html).toContain('Save cache limit');expect(html).toContain('next game launch');
+  expect(html).toContain('Cache limit (GiB)');expect(html).toContain('Default: 4 GiB');expect(html).toContain('Save limit');expect(html).toContain('next game launch');
   data.settings.shaderCacheLimitGiB=8.5;html=renderToStaticMarkup(<SettingsPage data={data} toast={()=>{}} />);expect(html).toContain('value="8.5"');
 });
 
@@ -40,12 +40,12 @@ it.each(['supported', 'unsupported', 'unknown'] as const)('uses the Store %s bad
   const product: AccountLibraryPage['products'][number] = { productId: '9AAAAAAAAAAA', title: 'Owned & game', access: 'owned',
     description: '', categories: [], installability, supportNote: 'Package <reason>' };
   const html = renderToStaticMarkup(<LibraryProductCard product={product} present={false} downloading={false} canInstall install={() => {}} />);
-  const store = renderToStaticMarkup(<StoreProductCard product={product} selected={false} disabled={installability !== 'supported'} label="Install" select={() => {}} install={() => {}} />);
+  const store = renderToStaticMarkup(<StoreProductCard licensed product={product} selected={false} disabled={installability !== 'supported'} label="Install" select={() => {}} install={() => {}} />);
   const badge = (text: string) => text.match(/<span class="catalog-support[^>]*>[\s\S]*?<\/span>/)?.[0];
   expect(badge(html)).toBe(badge(store));
   expect(html).toContain('<span>Owned</span>');
   expect(html.includes('disabled=""')).toBe(installability !== 'supported');
-  expect(html).toContain('title="Package &lt;reason&gt;"');
+  expect(html).toContain('data-tooltip="Package &lt;reason&gt;"');
   if (installability === 'unsupported') expect(html).toContain('>Unsupported</span>');
   const details=html.match(/<button[^>]*class="catalog-card-main"[^>]*>/)?.[0];
   expect(details).toContain('View details for Owned &amp; game');expect(details).not.toContain('disabled=');
@@ -94,12 +94,12 @@ it('offers Access and Play state filters without cloud streaming, preserving ins
   expect(html).not.toContain('Cloud playable'); expect(html).toContain('Installed games remain available');
   expect(html).toContain(data.games[0].title);
   expect(html).not.toContain('Owned · Installed');
-  expect(html).toContain(`title="${data.games[0].title}"`);
+  expect(html).toContain(`data-tooltip="${data.games[0].title}"`);
 });
 
-it('preserves full edition names in native hover tooltips and escapes special characters',()=>{
+it('preserves full edition names in in-window hover tooltips and escapes special characters',()=>{
   const html=renderToStaticMarkup(<GameTitle title={'A Long Game Name: "Complete" & Deluxe Edition (PC)'} />);
-  expect(html).toContain('title="A Long Game Name: &quot;Complete&quot; &amp; Deluxe Edition (PC)"');
+  expect(html).toContain('data-tooltip="A Long Game Name: &quot;Complete&quot; &amp; Deluxe Edition (PC)"');
 });
 
 it('uses Store box art instead of a package logo and wide artwork for details',()=>{

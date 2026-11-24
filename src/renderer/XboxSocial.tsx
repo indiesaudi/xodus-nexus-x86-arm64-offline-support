@@ -28,7 +28,7 @@ export function XboxSocial({auth,api,voice,overlay=false,shelf=false,close,openO
  const [profiles,setProfiles]=useState<Record<string,XboxPlayerProfile>>({});
  const [partyRecipient,setPartyRecipient]=useState<{xuid:string;gamertag:string}>();
  const generation=useRef(0);
- const identity=auth.stored===true&&!auth.running?auth.username:undefined;
+ const identity=!auth.running?(auth.player??(auth.stored===true?auth.username:undefined)):undefined;
  const selectedPerson=friends.find(person=>person.xuid===selected);
  const selectedConversation=inbox.find(row=>row.participants.includes(selected??''));
  const selectedName=selectedPerson?.gamertag??selectedConversation?.gamertag??'Xbox player';
@@ -55,7 +55,7 @@ export function XboxSocial({auth,api,voice,overlay=false,shelf=false,close,openO
  },[api,overlay,identity]);
  const closeProfile=(hide=true)=>{if(profile?.request)void api.completeXboxProfileRequest?.(profile.request,hide).catch(()=>{});setProfile(undefined);};
  const chooseChat=(id:string)=>{setSelected(id);setProblem(undefined);setChoosingChat(false);};
- const changeTab=(next:typeof tab)=>{setTab(next);setSelected(undefined);setChoosingChat(false);setProblem(undefined);};
+ const changeTab=(next:typeof tab)=>{closeProfile();setTab(next);setSelected(undefined);setChoosingChat(false);setProblem(undefined);};
  const back=()=>{if(profile)closeProfile();else{setSelected(undefined);setChoosingChat(false);setProblem(undefined);}};
 
  async function refresh(){
@@ -82,23 +82,24 @@ export function XboxSocial({auth,api,voice,overlay=false,shelf=false,close,openO
   void loader.start(ids);return()=>loader.stop();
  },[identity,api,active,inbox,selected,profile,tab]);
  const detail=Boolean(profile||selected||choosingChat);
- return <section className={'xbox-social xbox-guide'+(overlay||shelf?' social-overlay':'')+(expanded?' social-expanded-view':'')+(profile?' has-profile':'')} aria-label={ui("social.xbox_social_9dd063")}>
-  {!profile?<header className="social-guide-chrome">
-   {detail?<button className="social-circle-button social-back" onClick={back} aria-label={profile?'Close player profile':'Back to Xbox friends'}><ArrowLeft/></button>:null}
+ const ownProfile=profile?.xuid==='me';
+ return <section className={'xbox-social xbox-guide'+(overlay||shelf?' social-overlay':'')+(expanded?' social-expanded-view':'')+(profile?' has-profile':'')+(ownProfile?' has-own-profile':'')} aria-label={ui("social.xbox_social_9dd063")}>
+  {!profile||ownProfile&&close?<header className={'social-guide-chrome'+(ownProfile?' social-profile-controls':'')}>
+   {detail&&!ownProfile?<button data-gamepad-cancel className="social-circle-button social-back" onClick={back} aria-label={profile?'Close player profile':'Back to Xbox friends'}><ArrowLeft/></button>:null}
    <h1 className="social-sr-only">{ui("social.xbox_social_9dd063")}</h1><span className="social-chrome-spacer"/>
-   {openOverlay?<button className="social-circle-button" onClick={openOverlay} title={ui("social.open_xbox_social_desktop_window_and_party_audio_2fb371")} aria-label={ui("social.open_xbox_social_window_940467")}><ExternalLink/></button>:null}
-   {close?<button className="social-circle-button social-close" onClick={close} aria-label={ui("social.close_xbox_social_d9a718")}><XboxSocialIcon name="close"/></button>:null}
+   {openOverlay&&!ownProfile?<button className="social-circle-button" onClick={openOverlay} data-tooltip={ui("social.open_xbox_social_desktop_window_and_party_audio_2fb371")} aria-label={ui("social.open_xbox_social_window_940467")}><ExternalLink/></button>:null}
+   {close?<button data-gamepad-social-close data-gamepad-cancel={!detail || ownProfile || undefined} className="social-circle-button social-close" onClick={close} aria-label={ui("social.close_xbox_social_d9a718")}><XboxSocialIcon name="close"/></button>:null}
   </header>:null}
   {!identity?<p className="social-notice">{ui("social.sign_in_through_nexus_settings_to_load_friends_and_mess_134b98")}</p>:<>
-   {!detail?<nav className="social-tabs" role="tablist" aria-label={ui("social.xbox_social_9dd063")}>
-    {voice?<button role="tab" aria-selected={tab==='party'} aria-label={ui("social.party_dfa82f")} title={ui("social.party_dfa82f")} onClick={()=>changeTab('party')}><Headset/></button>:null}
-    <button role="tab" aria-selected={tab==='friends'} aria-label={ui("social.people_7db208")} title={ui("social.people_7db208")} onClick={()=>changeTab('friends')}><XboxSocialIcon name="people"/></button>
-    <button role="tab" aria-selected={tab==='chats'} aria-label={ui("social.chats_ef5b40")} title={ui("social.chats_ef5b40")} onClick={()=>changeTab('chats')}><XboxSocialIcon name="chat"/></button>
-    <button role="tab" aria-selected={false} aria-label={'Your Xbox profile'+(auth.gamertag?', '+auth.gamertag:'')} title={ui("social.your_xbox_profile_95979b")} onClick={()=>setProfile({xuid:'me'})}><XboxAvatar src={auth.avatarDataUrl} name={auth.gamertag}/></button>
+   {!expanded&&(!detail||ownProfile)?<nav className="social-tabs" role="tablist" data-gamepad-tabs aria-label={ui("social.xbox_social_9dd063")}>
+    {voice?<button role="tab" data-gamepad-tab aria-selected={!profile&&tab==='party'} aria-label={ui("social.party_dfa82f")} data-tooltip={ui("social.party_dfa82f")} onClick={()=>changeTab('party')}><Headset/></button>:null}
+    <button role="tab" data-gamepad-tab aria-selected={!profile&&tab==='friends'} aria-label={ui("social.people_7db208")} data-tooltip={ui("social.people_7db208")} onClick={()=>changeTab('friends')}><XboxSocialIcon name="people"/></button>
+    <button role="tab" data-gamepad-tab aria-selected={!profile&&tab==='chats'} aria-label={ui("social.chats_ef5b40")} data-tooltip={ui("social.chats_ef5b40")} onClick={()=>changeTab('chats')}><XboxSocialIcon name="chat"/></button>
+    <button role="tab" data-gamepad-tab aria-selected={ownProfile} aria-label={'Your Xbox profile'+(auth.gamertag?', '+auth.gamertag:'')} data-tooltip={ui("social.your_xbox_profile_95979b")} onClick={()=>setProfile({xuid:'me'})}><XboxAvatar src={auth.avatarDataUrl} name={auth.gamertag}/></button>
    </nav>:null}
    <XboxRuntimeInvites state={runtimeInvites} api={runtimeApi} friends={friends}/>
    <div className={'social-guide-content'+(profile?' profile-content':'')} aria-busy={busy}>
-    {profile?<XboxPlayerCard api={api} account={identity} expanded={expanded} xuid={profile.xuid} person={friends.find(p=>p.xuid===profile.xuid)} ownAvatar={profile.xuid==='me'?auth.avatarDataUrl:undefined} back={()=>closeProfile()} close={close}
+    {profile?<XboxPlayerCard api={api} account={identity} expanded={expanded} xuid={profile.xuid} person={friends.find(p=>p.xuid===profile.xuid)} ownAvatar={ownProfile?auth.avatarDataUrl:undefined} back={ownProfile?undefined:()=>closeProfile()} close={ownProfile?undefined:close}
      changed={()=>{const current=generation.current;void api.getXboxFriends().then(value=>{if(current===generation.current)setFriends(value);}).catch(()=>{});}}
      chat={()=>{const id=profile.xuid;closeProfile(false);chooseChat(id);}}
      party={voice?player=>{const id=profile.xuid;closeProfile(false);setSelected(undefined);setPartyRecipient({xuid:id,gamertag:player.gamertag});changeTab('party');}:undefined}/>:null}
@@ -110,7 +111,7 @@ export function XboxSocial({auth,api,voice,overlay=false,shelf=false,close,openO
      openProfile={id=>{setProfile({xuid:id});setProblem(undefined);}} chooseChat={chooseChat}
      party={voice?person=>{setPartyRecipient({xuid:person.xuid,gamertag:person.gamertag});changeTab('party');}:undefined}/>:null}
     {!profile&&!selected&&!choosingChat&&tab==='chats'?<div className="social-chats-pane">
-     <div className="social-page-heading"><h2>{ui("social.chats_ef5b40")}</h2><button className="social-circle-button" onClick={()=>{setChoosingChat(true);}} aria-label={ui("social.new_chat_db1838")} title={ui("social.new_chat_db1838")}><Plus/></button></div>
+     <div className="social-page-heading"><h2>{ui("social.chats_ef5b40")}</h2><button className="social-circle-button" onClick={()=>{setChoosingChat(true);}} aria-label={ui("social.new_chat_db1838")} data-tooltip={ui("social.new_chat_db1838")}><Plus/></button></div>
      <div className="social-inbox">{inbox.map(item=>{const recipient=item.participants.length===1?item.participants[0]:undefined;const person=friends.find(p=>p.xuid===recipient)??(recipient?profiles[recipient]:undefined);const name=person?.gamertag??item.gamertag??ui('notifications.player');
       const unread=item.unread&&(!recipient||!item.lastMessage||!readKeys.includes(messageNoticeKey(recipient,item.lastMessage.id)));
       return <button className={'social-conversation'+(unread?' unread':'')} key={item.id} disabled={!recipient||item.type!=='OneToOne'} onClick={()=>{if(recipient)chooseChat(recipient);}}>

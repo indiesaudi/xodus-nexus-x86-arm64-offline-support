@@ -17,7 +17,7 @@ function safeName(name) {
   return typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(name) && path.basename(name) === name;
 }
 function validateContext(kind, context) {
-  if (!['launcher', 'runtime', 'backend'].includes(kind) || !/^[a-f0-9]{40}$/.test(context.commit ?? '') ||
+  if (!['launcher', 'backend'].includes(kind) || !/^[a-f0-9]{40}$/.test(context.commit ?? '') ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(context.repository ?? '') || !/^\d+$/.test(String(context.runId)))
     throw Error('Invalid candidate identity');
 }
@@ -25,15 +25,22 @@ function isBinary(kind, name) {
   return kind === 'launcher' ? name.endsWith('.AppImage') : new RegExp(`^xodus-nexus-${kind}-[A-Za-z0-9._-]+-${ARCHES}\\.tar\\.xz$`).test(name);
 }
 function validateArchitectureSet(kind, binaries) {
-  if (kind === 'runtime') {
-    if (binaries.length !== 1) throw Error('Legacy runtime candidate must contain one complete build');
+  // Keep previously recorded single-image manifests verifiable. New named
+  // multi-architecture builds must be one family and version with no duplicate
+  // targets. Nexus-Launcher is canonical; Xodus-Nexus stays accepted for old
+  // candidates and already published releases.
+  if (kind === 'launcher' && binaries.length === 1 && binaries[0] === 'Xodus-Nexus.AppImage') return;
+  if (kind === 'launcher') {
+    const pattern = /^(Nexus-Launcher|Xodus-Nexus)-(\d+\.\d+\.\d+)-(x86_64|arm64)\.AppImage$/;
+    const entries = binaries.map(name => pattern.exec(name));
+    if (!entries.length || entries.some(value => !value) || entries.length > 2 ||
+        new Set(entries.map(value => value[1])).size !== 1 ||
+        new Set(entries.map(value => value[2])).size !== 1 ||
+        new Set(entries.map(value => value[3])).size !== entries.length)
+      throw Error('Candidate architectures must identify one family and version without duplicate or unknown targets');
     return;
   }
-  // Keep previously recorded single-image manifests verifiable. New named
-  // multi-architecture builds must be one version with no duplicate targets.
-  if (kind === 'launcher' && binaries.length === 1 && binaries[0] === 'Xodus-Nexus.AppImage') return;
-  const pattern = kind === 'launcher' ? /^(Xodus-Nexus-\d+\.\d+\.\d+)-(x86_64|arm64)\.AppImage$/
-    : /^(xodus-nexus-backend-\d+\.\d+\.\d+-linux)-(x86_64|aarch64)\.tar\.xz$/;
+  const pattern = /^(xodus-nexus-backend-\d+\.\d+\.\d+-linux)-(x86_64|aarch64)\.tar\.xz$/;
   const entries = binaries.map(name => pattern.exec(name));
   if (!entries.length || entries.some(value => !value) || entries.length > 2 ||
       new Set(entries.map(value => value[1])).size !== 1 || new Set(entries.map(value => value[2])).size !== entries.length)
@@ -42,15 +49,14 @@ function validateArchitectureSet(kind, binaries) {
 function checksumName(name) {
   return name.endsWith('.tar.xz') ? name.replace(/\.tar\.xz$/, '.sha512sum') : `${name}.sha512sum`;
 }
-/** The corresponding-source archive for a runtime or backend binary. */
-function sourceName(kind, binary) {
-  return kind === 'backend' ? binary.replace('.tar.xz', '-source.tar.xz') : binary.replace(new RegExp(`-${ARCHES}\\.tar\\.xz$`), '-source.tar.xz');
+/** The corresponding-source archive for a backend binary. */
+function sourceName(binary) {
+  return binary.replace('.tar.xz', '-source.tar.xz');
 }
 /** Every file one binary must be accompanied by, in checksum pairs. */
 function expectedFiles(kind, binary) {
   const files = [binary, checksumName(binary)];
-  if (kind !== 'launcher') { const source = sourceName(kind, binary); files.push(source, checksumName(source)); }
-  if (kind === 'backend') files.push(binary.replace('.tar.xz', '.manifest.json'));
+  if (kind === 'backend') { const source = sourceName(binary); files.push(source, checksumName(source), binary.replace('.tar.xz', '.manifest.json')); }
   return files;
 }
 export async function writeManifest(kind, directory, context) {
@@ -59,7 +65,7 @@ export async function writeManifest(kind, directory, context) {
   const binaries = entries.filter(name => isBinary(kind, name)).sort();
   validateArchitectureSet(kind, binaries);
   const sources = entries.filter(name => new RegExp(`^xodus-nexus-${kind}-[A-Za-z0-9._-]+-source\\.tar\\.xz$`).test(name)).sort();
-  const expectedSources = kind === 'launcher' ? [] : [...new Set(binaries.map(binary => sourceName(kind, binary)))].sort();
+  const expectedSources = kind === 'backend' ? [...new Set(binaries.map(binary => sourceName(binary)))].sort() : [];
   if (binaries.length === 0 || sources.join('\n') !== expectedSources.join('\n')) throw Error('Expected one complete candidate per architecture');
   const files = [];
   const seen = new Set();
@@ -112,7 +118,7 @@ export async function verifyManifest(directory, expected = {}) {
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [mode, kind, directory] = process.argv.slice(2);
-  if (mode !== 'write' || !directory) throw Error('Usage: artifact-manifest.mjs write launcher|runtime|backend DIRECTORY');
+  if (mode !== 'write' || !directory) throw Error('Usage: artifact-manifest.mjs write launcher|backend DIRECTORY');
   await writeManifest(kind, directory, { commit: process.env.GITHUB_SHA, repository: process.env.GITHUB_REPOSITORY,
     ref: process.env.GITHUB_REF, runId: process.env.GITHUB_RUN_ID });
 }

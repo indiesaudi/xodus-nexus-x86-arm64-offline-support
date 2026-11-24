@@ -1,8 +1,9 @@
 import { constants, promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { run } from './process.js';
-import { installedEacRuntime } from './anti-cheat.js';
+import { installedBattlEyeRuntime, installedEacRuntime } from './anti-cheat.js';
 import { prepareManagedPrefix } from './managed-prefix.js';
 import { systemGameLocale } from './game-locale.js';
 import { windowsGameLocale } from '../shared/game-language.js';
@@ -16,9 +17,156 @@ function shellQuote(value: string): string {
 
 export interface ProtonRunner {
   command: string;
-  launchCommand?: string;
+  launchCommand: string;
   compatibilityDataPath: string;
+  protonRoot: string;
+  /** The verified game location reported to the Play command, when known. */
+  compatibilityLocation?: SteamCompatLocation;
   stopPrefix: { command: string; args: string[] };
+}
+
+// Optional Proton components (CachyOS) are prepared by the runtime's own
+// `proton` session, which downloads them on first use from the public
+// proton-upscalers component index. The launcher must say so honestly instead of
+// implying they are always present.
+const PROTON_OPTIONAL_COMPONENTS = [
+  { environment: 'PROTON_USE_OPTISCALER', label: 'OptiScaler', payload: 'drive_c/windows/system32/umu/OptiScaler.dll' },
+] as const;
+
+function protonComponentEnabled(value: string | undefined): boolean {
+  return value !== undefined && value.trim() !== '' && value.trim() !== '0';
+}
+
+/**
+ * Reports how a launch option that asks for an optional Proton component will be
+ * served. The CachyOS Proton session deploys the payload into the managed prefix
+ * and exports WINE_OPTISCALER_NAME; without the payload (for example an offline
+ * first launch) the game still starts and the component stays inactive.
+ * Nothing is claimed for runtimes that do not ship the upscaler integration.
+ */
+export async function protonOptionalComponentNotices(
+  environment: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  protonRoot: string,
+  compatibilityDataPath: string,
+  offline: boolean,
+): Promise<string[]> {
+  let capable = true;
+  try { await fs.access(path.join(protonRoot, 'protonfixes', 'upscalers.py'), constants.R_OK); }
+  catch { capable = false; }
+  if (!capable) return [];
+  const notices: string[] = [];
+  for (const component of PROTON_OPTIONAL_COMPONENTS) {
+    if (!protonComponentEnabled(environment[component.environment])) continue;
+    let prepared = true;
+    try { await fs.access(path.join(compatibilityDataPath, 'pfx', component.payload), constants.R_OK); }
+    catch { prepared = false; }
+    if (prepared) notices.push(`${component.label} files are present in this Proton prefix; the runtime verifies them at launch.`);
+    else if (offline) notices.push(`${component.label} files are not present in this Proton prefix yet. This launch is offline, so it can only use an already downloaded component; without one ${component.label} stays inactive.`);
+    else notices.push(`${component.label} files are prepared by the CachyOS Proton session on first use. If that download fails, the game still starts without ${component.label}.`);
+  }
+  return notices;
+}
+
+/**
+ * Proton's own `nonzero()` test for a launch option: only a missing, empty or
+ * literal "0" value disables it (whitespace-only values stay enabled upstream).
+ */
+function upstreamNonzero(value: string | undefined): boolean {
+  return value !== undefined && value.length > 0 && value !== '0';
+}
+
+/**
+ * Reports requested Proton launch options that this runtime cannot act on
+ * through the Nexus Play path. Play runs the runtime's own Proton session
+ * directly without entering the runtime's umu/Steam helper, so options that
+ * helper would serve stay inactive. An optional genuine Steam shortcut handoff
+ * can still provide a Steam game id, so the notices always evaluate the actual
+ * launch environment instead of assuming that identity is missing. They are
+ * reported here instead of being simulated with an invented Steam identity.
+ * Only options the user requested are reported.
+ *
+ * `location` is the verified game-location result the runner captured for this
+ * launch. The game-drive notice is emitted only when that context carries no
+ * real Steam library, so a genuinely mapped S: drive is never reported as
+ * inactive.
+ */
+export async function protonLaunchFeatureNotices(
+  environment: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  protonRoot: string,
+  location?: SteamCompatLocation,
+): Promise<string[]> {
+  const present = async (relative: string): Promise<boolean> => {
+    try { await fs.access(path.join(protonRoot, relative), constants.R_OK); return true; }
+    catch { return false; }
+  };
+  const notices: string[] = [];
+  if (upstreamNonzero(environment.PROTON_DISCORD_BRIDGE)) {
+    if (await present('files/lib/wine/discord-rpc-bridge/bridge.exe')) {
+      // The pinned bridge documents --steam through PROTON_REMOTE_DEBUG_CMD
+      // (extras/discord-rpc-bridge/build/bridge.sh), and the pinned Proton
+      // session starts that command before the game (CachyOS proton:2418,
+      // 2507-2514, 2553-2560). A --rpc companion is another route. Nexus
+      // configures neither and cannot verify a user starter or an existing
+      // prefix service, so the payload alone proves no Rich Presence state.
+      notices.push('PROTON_DISCORD_BRIDGE is set. This runtime includes the Discord RPC bridge. The Nexus Proton Play route does not automatically configure or start it, so the bundled payload alone does not establish Rich Presence. Custom service startup or an existing prefix service is not verified by Nexus.');
+    } else {
+      notices.push('PROTON_DISCORD_BRIDGE is set, but this runtime does not include the Discord RPC bridge, so the option has no effect.');
+    }
+  }
+  if (upstreamNonzero(environment.PROTON_LOCAL_SHADER_CACHE) && !await present('protonfixes/utilities.py')) {
+    notices.push('PROTON_LOCAL_SHADER_CACHE is set, but this runtime does not implement it, so the option has no effect.');
+  }
+  // Proton's own log file exists only when the effective environment carries a
+  // Steam game id; the pinned setup_logging checks key presence, not the value.
+  // A genuine Steam shortcut handoff or an ambient value both satisfy it.
+  if (upstreamNonzero(environment.PROTON_LOG) && environment.SteamGameId === undefined) {
+    notices.push('PROTON_LOG is set, but Proton creates its log file only when the launch provides a Steam game id, and this launch has none. The configured Wine and DXVK logging variables still apply.');
+  }
+  if (upstreamNonzero(environment.PROTON_SET_GAME_DRIVE) && !location?.libraryPaths) {
+    notices.push('PROTON_SET_GAME_DRIVE is set, but this game is not installed inside a verified Steam library (a real steamapps directory), so Proton has no library for the S: game drive. Nexus does not fabricate one. The other mount drives follow the runtime.');
+  }
+  return notices;
+}
+
+export interface SteamCompatLocation {
+  /** The real install directory Proton receives as the game location. */
+  installPath: string;
+  /** A real `steamapps` directory containing the install, when one exists. */
+  libraryPaths?: string;
+}
+
+/**
+ * Location context for Proton's own drive mapping. `PROTON_SET_GAME_DRIVE`
+ * maps S: to the parent of a `steamapps` directory that contains the game, and
+ * the runtime itself validates the library parent (writable, same device).
+ * Nexus reports the genuine install directory, and the real library only when
+ * the game is actually installed inside one. A Store installation outside a
+ * Steam library reports just the install directory, so nothing is fabricated
+ * for a Steam-only drive.
+ */
+export async function steamCompatLocation(installPath: string): Promise<SteamCompatLocation | undefined> {
+  if (!installPath || !path.isAbsolute(installPath)) return undefined;
+  let install: string;
+  try {
+    install = await fs.realpath(installPath);
+    if (!(await fs.stat(install)).isDirectory()) return undefined;
+  } catch { return undefined; }
+  const located: SteamCompatLocation = { installPath: install };
+  let directory = path.dirname(install);
+  for (;;) {
+    if (path.basename(directory) === 'steamapps') {
+      try {
+        // The runtime looks up the real path and requires the basename
+        // `steamapps`. Report the library only when it would satisfy that.
+        const library = await fs.realpath(directory);
+        if (path.basename(library) === 'steamapps' && (await fs.stat(library)).isDirectory()) located.libraryPaths = library;
+      } catch { /* A library the runtime would reject stays unreported. */ }
+      return located;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return located;
+    directory = parent;
+  }
 }
 
 const REQUIRED_PREFIX_FILES = [
@@ -393,8 +541,8 @@ export async function prepareProtonRunner(
   winePath: string,
   compatibilityDataPath: string,
   steamRoot: string,
-  gameWineCommand = winePath,
   shaderCacheLimitGiB = DEFAULT_SHADER_CACHE_GIB,
+  options: { installPath?: string; home?: string; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<ProtonRunner | undefined> {
   const cacheLimits = shaderCacheLimits(shaderCacheLimitGiB);
   // An arm64 runtime keeps its own loader, prefix and ARM64X modules; Proton's
@@ -416,14 +564,18 @@ export async function prepareProtonRunner(
   let missing = await missingPrefixFiles(compatibilityDataPath, layout);
   if (missing.length > 0) {
     const initialized = await run(proton, ['run', 'cmd', '/c', 'exit'], {
+      // The launch environment is a Steam-sanitized copy of the main process
+      // environment, so prefix creation must not reintroduce Steam's cache
+      // variables. Play always passes it; the main process copy is the default.
       env: {
-        ...process.env,
+        ...(options.environment ?? process.env),
         STEAM_COMPAT_DATA_PATH: compatibilityDataPath,
         STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
         SteamAppId: '0',
         SteamGameId: '0',
         UMU_ID: 'xodus-nexus',
         UMU_USE_STEAM: '0',
+        PYTHONDONTWRITEBYTECODE: '1',
       },
       maxOutput: 1_000_000,
     });
@@ -499,6 +651,7 @@ export async function prepareProtonRunner(
   const executablePath = [path.join(files, layout.bin), process.env.PATH ?? ''].filter(Boolean).join(':');
   const wineserver = path.join(files, layout.bin, 'wineserver');
   const eacRuntime = await installedEacRuntime(steamRoot);
+  const battlEyeRuntime = await installedBattlEyeRuntime(steamRoot, options.home ?? os.homedir());
   // Keep the caches outside temporary launch views, separately for each prefix.
   const shaderCaches = await prepareShaderCache(compatibilityDataPath);
   const defaultEnvironment = (name: string, value: string) => [
@@ -507,8 +660,11 @@ export async function prepareProtonRunner(
     'fi',
   ];
   const runner = path.join(compatibilityDataPath, 'xodus-proton-wine');
-  const temporary = `${runner}.tmp-${process.pid}`;
-  const makeScript = (launchWine: string) => [
+  const launchScript = path.join(compatibilityDataPath, 'xodus-proton-game');
+  const wineOverrides = `dxgi=n;d3d11=n;d3d10core=n;d3d9=n;d3d12=n;d3d12core=n${http2Runtime ? ';winhttp=b;libnghttp2=n' : ''}${dxvkRuntime ? ';d3d8=n' : ''}`;
+  // Play keeps the user's launch-option value for these two managed settings,
+  // exactly like the previous layering where the game wrapper sat below Wine.
+  const sharedScript = (launchLines: string[], extraExports: string[] = [], overridable = false) => [
     '#!/bin/sh',
     `export WINEPREFIX=${shellQuote(path.join(compatibilityDataPath, 'pfx'))}`,
     "export WINEARCH='win64'",
@@ -525,8 +681,19 @@ export async function prepareProtonRunner(
     `export MEDIACONV_BLANK_VIDEO_FILE=${shellQuote(path.join(files, 'share', 'media', 'blank.mkv'))}`,
     `export MEDIACONV_BLANK_AUDIO_FILE=${shellQuote(path.join(files, 'share', 'media', 'blank.ptna'))}`,
     `export PATH=${shellQuote(executablePath)}`,
-    `export WINEDLLOVERRIDES='dxgi=n;d3d11=n;d3d10core=n;d3d9=n;d3d12=n;d3d12core=n${http2Runtime ? ';winhttp=b;libnghttp2=n' : ''}${dxvkRuntime ? ';d3d8=n' : ''}'`,
-    "export WINE_LARGE_ADDRESS_AWARE='1'",
+    // The Proton session enables large-address-aware by default through its own
+    // PROTON_FORCE_LARGE_ADDRESS_AWARE handling, so Play never exports a Wine
+    // default here. An explicit launch-option value must still win: tell that
+    // session to drop its default whenever Wine's own variable is defined. The
+    // variable Proton received is never replaced, its own pair stays coherent.
+    ...(overridable
+      ? [
+        ...defaultEnvironment('WINEDLLOVERRIDES', wineOverrides),
+        'if [ "${WINE_LARGE_ADDRESS_AWARE+x}" = x ] && [ "${PROTON_FORCE_LARGE_ADDRESS_AWARE+x}" != x ]; then',
+        "  export PROTON_FORCE_LARGE_ADDRESS_AWARE='0'",
+        'fi',
+      ]
+      : [`export WINEDLLOVERRIDES=${shellQuote(wineOverrides)}`, "export WINE_LARGE_ADDRESS_AWARE='1'"]),
     // Preserve each explicit setting, including disabled/empty values. Limits
     // apply only when selecting our managed driver directory, not a custom one.
     ...defaultEnvironment('VKD3D_SHADER_CACHE_PATH', shaderCaches.vkd3d),
@@ -539,43 +706,89 @@ export async function prepareProtonRunner(
     `  export MESA_SHADER_CACHE_DIR=${shellQuote(shaderCaches.mesa)}`,
     ...defaultEnvironment('MESA_SHADER_CACHE_MAX_SIZE', cacheLimits.mesa),
     'fi',
-    // Use Steam's genuine compatibility bridge when installed. Never force a
-    // particular game to load it or replace an explicit user configuration.
-    ...(eacRuntime ? [
-      'if [ -z "${PROTON_EAC_RUNTIME:-}" ]; then',
-      `  export PROTON_EAC_RUNTIME=${shellQuote(eacRuntime)}`,
-      'fi',
-    ] : []),
+    // Use Steam's genuine compatibility bridge only when the launch did not
+    // configure it at all. An explicit value, including an empty one, is a
+    // choice: it must win over auto-discovery exactly like the settings above.
+    ...(eacRuntime ? defaultEnvironment('PROTON_EAC_RUNTIME', eacRuntime) : []),
+    // The same rule selects Steam's official BattlEye bridge. It is exported
+    // only when installed; the game's own BattlEye client decides to use it.
+    ...(battlEyeRuntime ? defaultEnvironment('PROTON_BATTLEYE_RUNTIME', battlEyeRuntime) : []),
     // Private lifecycle command uses the exact same prefix/library environment
     // as launch. It is only invoked for explicit Stop/launcher shutdown.
     'if [ "${1:-}" = "--nexus-stop-prefix" ]; then',
     `  exec ${shellQuote(wineserver)} -k`,
     'fi',
+    // FEX inspects the first .exe argument as a host path, so it runs before the
+    // Play command rewrites a Unix executable into the prefix Z: form below.
     ...fexEnvironment(path.join(compatibilityDataPath, 'proton-fex-config.json'), path.join(files, 'lib', 'wine', 'i386-windows', 'xgameruntime.dll')),
+    ...extraExports,
+    // Force this after inherited launch options and every managed export: the
+    // Proton session is Python and must not create __pycache__ inside the
+    // immutable runtime family root.
+    "export PYTHONDONTWRITEBYTECODE='1'",
     // Launchers (including EAC) may finish before the game they spawned.
     // Keep Xodus and its temporary launch view/account service alive until
     // the isolated game prefix has no remaining Wine processes.
     `if [ ! -x ${shellQuote(wineserver)} ]; then`,
-    `  exec ${shellQuote(launchWine)} "$@"`,
+    ...launchLines.map((line) => `  exec ${line}`),
     'fi',
     'launch_status=0',
-    `${shellQuote(launchWine)} "$@" || launch_status=$?`,
+    ...launchLines.map((line) => `${line} || launch_status=$?`),
     'wait_status=0',
     `${shellQuote(wineserver)} -w || wait_status=$?`,
     'if [ "$launch_status" -ne 0 ]; then exit "$launch_status"; fi',
     'exit "$wait_status"',
     '',
   ].join('\n');
-  await fs.writeFile(temporary, makeScript(winePath), { mode: 0o700 });
+  // Internal prefix operations and Stop keep using the runtime's Wine directly.
+  const temporary = `${runner}.tmp-${process.pid}`;
+  await fs.writeFile(temporary, sharedScript([`${shellQuote(winePath)} "$@"`]), { mode: 0o700 });
   await fs.rename(temporary, runner);
   await fs.chmod(runner, 0o700);
-  let launchCommand: string | undefined;
-  if (gameWineCommand !== winePath) {
-    launchCommand = path.join(compatibilityDataPath, 'xodus-proton-game');
-    const temporaryLaunch = `${launchCommand}.tmp-${process.pid}`;
-    await fs.writeFile(temporaryLaunch, makeScript(gameWineCommand), { mode: 0o700 });
-    await fs.rename(temporaryLaunch, launchCommand);
-    await fs.chmod(launchCommand, 0o700);
-  }
-  return { command: runner, ...(launchCommand ? { launchCommand } : {}), compatibilityDataPath, stopPrefix: { command: runner, args: ['--nexus-stop-prefix'] } };
+  // Play goes through the runtime's Proton session so its per-launch setup runs:
+  // Proton derives the prefix from STEAM_COMPAT_DATA_PATH (the same managed
+  // prefix), applies its environment and protonfixes, and processes the Proton
+  // launch options of that runtime, for example PROTON_USE_OPTISCALER, before it
+  // starts the game. Launch options still arrive in this process environment.
+  const temporaryLaunch = `${launchScript}.tmp-${process.pid}`;
+  const compatLocation = options.installPath ? await steamCompatLocation(options.installPath) : undefined;
+  await fs.writeFile(temporaryLaunch, sharedScript([`${shellQuote(proton)} run "$@"`], [
+    `export STEAM_COMPAT_DATA_PATH=${shellQuote(compatibilityDataPath)}`,
+    `export STEAM_COMPAT_CLIENT_INSTALL_PATH=${shellQuote(steamRoot)}`,
+    // Proton's own shader cache switch (PROTON_LOCAL_SHADER_CACHE) reads
+    // STEAM_COMPAT_SHADER_PATH. Steam points it at the per-game shader cache, so
+    // Nexus maps it to the managed cache of this prefix instead of inventing a
+    // Steam library. The runtime keeps the driver caches above: it only applies
+    // its own paths through setdefault.
+    `export STEAM_COMPAT_SHADER_PATH=${shellQuote(shaderCaches.steamapp)}`,
+    // Proton's game drive reads the game location from its environment. Report
+    // the real install directory, and the genuine Steam library only when the
+    // game is installed inside a `steamapps` directory; a Store installation
+    // outside one gets no invented library. These two managed variables must
+    // also match the captured context in the other direction: a verified value
+    // replaces an inherited Steam/launcher value, and without one Play removes
+    // it instead of letting a stale ambient value contradict the launch notice.
+    ...(compatLocation
+      ? [`export STEAM_COMPAT_INSTALL_PATH=${shellQuote(compatLocation.installPath)}`]
+      : ['unset STEAM_COMPAT_INSTALL_PATH']),
+    ...(compatLocation?.libraryPaths
+      ? [`export STEAM_COMPAT_LIBRARY_PATHS=${shellQuote(compatLocation.libraryPaths)}`]
+      : ['unset STEAM_COMPAT_LIBRARY_PATHS']),
+    // Proton's session selects its launch route from UMU_ID, UMU_USE_STEAM and
+    // whether the executable argument is a Unix path: with UMU_ID unset it runs
+    // steam.exe, and a leading "/" selects umu.exe. Nexus starts the runtime's own
+    // Wine with the command the backend prepared, so pin the plain-Wine route.
+    "export UMU_ID='xodus-nexus'",
+    "export UMU_USE_STEAM='0'",
+    'case "${1:-}" in',
+    '  /*)',
+    '    nexus_game_command="Z:$1"',
+    '    shift',
+    '    set -- "$nexus_game_command" "$@"',
+    '    ;;',
+    'esac',
+  ], true), { mode: 0o700 });
+  await fs.rename(temporaryLaunch, launchScript);
+  await fs.chmod(launchScript, 0o700);
+  return { command: runner, launchCommand: launchScript, compatibilityDataPath, protonRoot, compatibilityLocation: compatLocation, stopPrefix: { command: runner, args: ['--nexus-stop-prefix'] } };
 }

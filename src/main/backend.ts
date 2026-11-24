@@ -4,18 +4,29 @@ import { randomUUID, createHash } from 'node:crypto';
 import type { BackendCapabilities, BackendStatus } from '../shared/types.js';
 import { parseBackendHelp } from '../shared/utils.js';
 import { run } from './process.js';
-import { backendLock, backendRecipeSha256, backendAssets, compareVersions } from './backend-package.js';
-import { discoverBackend, installBackend, type BackendArtifact } from './backend-releases.js';
+import { backendLock, compareVersions } from './backend-package.js';
+import { discoverBackend, installBackend, prepareLocalBackend, backendHttpStatus, type BackendArtifact, BackendInstallError, type BackendUpdateStage } from './backend-releases.js';
+import { backendDiagnostic } from './backend-diagnostics.js';
+import type { PreparedComponentUpdate } from './component-updates.js';
 import { BackendPrerequisiteError, backendPrerequisiteFailure } from './backend-prerequisites.js';
 
-const REPOSITORY = backendLock.repository;
 export const LINUX_RUN_PATCH = backendLock.compatibility;
-const LINUX_RUN_RELEASE = backendLock.patchId;
 const EMPTY_CAPABILITIES: BackendCapabilities = {
   commands: [], account: false, login: false, logout: false, download: false, streaming: false, run: false,
 };
 
-interface ManagedPointer { commit: string; binaryPath: string; builtAt: string; linuxRunPatch?: string; recipeSha256?: string; version?: string; delivery?: 'release' | 'local' }
+interface ManagedPointer { commit: string; binaryPath: string; builtAt: string; linuxRunPatch?: string; recipeSha256?: string; version?: string; delivery?: 'release' | 'local'; localBuild?: true; diagnosticOnly?: true; promotable?: false }
+type BackendMutation = 'update';
+export type BackendMutationTarget = Readonly<Pick<ManagedPointer, 'commit' | 'binaryPath' | 'version' | 'delivery' | 'linuxRunPatch' | 'recipeSha256'>>;
+/** Publication of current.json is a commit boundary, not a durability claim. */
+export class BackendMutationError extends Error {
+  readonly target?: BackendMutationTarget;
+  constructor(cause: unknown, readonly operation: BackendMutation, readonly committed: boolean, target?: BackendMutationTarget) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'BackendMutationError';
+    this.target = target ? Object.freeze({ ...target }) : undefined;
+  }
+}
 
 export class BackendManager {
   private status: BackendStatus;
@@ -25,6 +36,8 @@ export class BackendManager {
   private isOperationActive: () => boolean;
   private artifact?: BackendArtifact;
   private probeFailure?: string;
+  private reconciliationEpoch = 0;
+  private refreshSequence = 0;
 
   constructor(
     userData: string,
@@ -45,17 +58,12 @@ export class BackendManager {
       updating: false,
       externalRoot,
       capabilities: EMPTY_CAPABILITIES,
-      prerequisites: { git: false, cargo: false, rustc: false, protoc: false },
     };
   }
 
   get current(): BackendStatus { return structuredClone(this.status); }
 
-  setExternalRoot(root: string): void { this.status.externalRoot = root; }
-
-  private async commandExists(command: string): Promise<boolean> {
-    try { return (await run(command, ['--version'], { maxOutput: 20_000 })).code === 0; } catch { return false; }
-  }
+  setExternalRoot(root: string): void { this.status.externalRoot = root; this.reconciliationEpoch++; }
 
   private async validate(binaryPath: string): Promise<BackendCapabilities | null> {
     try {
@@ -88,6 +96,14 @@ export class BackendManager {
           && designation?.code === 0 && /(?:^|\s)--license-cache(?:\s|$)/m.test(designation.output);
         capabilities.offlineLaunch = Boolean(capabilities.licenseCache && /(?:^|\s)--offline(?:\s|$)/m.test(launch.output));
       }
+      if (capabilities.login) {
+        const login = await run(binaryPath, ['login', '--help'], { maxOutput: 100_000 });
+        capabilities.playerAccount = login.code === 0 && /(?:^|\s)--player(?:\s|$)/m.test(login.output);
+        const profileHelp = await run(binaryPath, ['profile', '--help']);
+        capabilities.licenseProfile = profileHelp.code === 0 && /(?:^|\s)--license(?:\s|$)/m.test(profileHelp.output);
+        const saved = await run(binaryPath, ['saved-accounts', '--help']);
+        capabilities.savedAccounts = saved.code === 0 && /(?:^|\s)--enable(?:\s|$)/m.test(saved.output);
+      }
       return capabilities.login && capabilities.streaming ? capabilities : null;
     } catch (error) { if (error instanceof BackendPrerequisiteError) throw error; return null; }
   }
@@ -104,10 +120,9 @@ export class BackendManager {
   }
 
   async refresh(): Promise<BackendStatus> {
-    const [git, cargo, rustc, protoc] = await Promise.all([
-      this.commandExists('git'), this.commandExists('cargo'), this.commandExists('rustc'), this.commandExists('protoc'),
-    ]);
-    this.status.prerequisites = { git, cargo, rustc, protoc };
+    const epoch = this.reconciliationEpoch, sequence = ++this.refreshSequence;
+    const externalRoot = this.status.externalRoot;
+    const current = () => epoch === this.reconciliationEpoch && sequence === this.refreshSequence;
 
     let validationFailure: string | undefined;
     const validate = (binary: string) => this.validate(binary).catch(error => {
@@ -117,33 +132,36 @@ export class BackendManager {
     const pointer = await this.readPointer();
     if (pointer) {
       const capabilities = await validate(pointer.binaryPath);
+      if (!current()) return this.current;
       if (capabilities) {
         this.probeFailure = undefined;
         Object.assign(this.status, {
           available: true, source: 'managed', binaryPath: pointer.binaryPath,
           commit: pointer.commit, capabilities, blockReason: undefined,
-          linuxRunPatch: pointer.linuxRunPatch,
+          linuxRunPatch: pointer.linuxRunPatch, recipeSha256: pointer.recipeSha256,
           version: pointer.version, delivery: pointer.delivery,
         });
         return this.current;
       }
     }
 
-    const externalBinary = path.join(this.status.externalRoot, 'target', 'release', 'xodus-cli');
+    const externalBinary = path.join(externalRoot, 'target', 'release', 'xodus-cli');
     const capabilities = await validate(externalBinary);
+    const commit = capabilities ? await this.gitCommit(externalRoot) : undefined;
+    if (!current()) return this.current;
     if (capabilities) {
       this.probeFailure = undefined;
       Object.assign(this.status, {
         available: true, source: 'external', binaryPath: externalBinary,
-        commit: await this.gitCommit(this.status.externalRoot), capabilities, blockReason: undefined,
-        linuxRunPatch: undefined,
+        commit, capabilities, blockReason: undefined,
+        linuxRunPatch: undefined, recipeSha256: undefined,
         version: undefined, delivery: undefined,
       });
     } else {
       this.probeFailure = validationFailure;
       Object.assign(this.status, {
         available: false, source: 'none', binaryPath: undefined, commit: undefined,
-        version: undefined, delivery: undefined, linuxRunPatch: undefined,
+        version: undefined, delivery: undefined, linuxRunPatch: undefined, recipeSha256: undefined,
         capabilities: EMPTY_CAPABILITIES,
         blockReason: validationFailure ?? 'No validated xodus-cli with login and streaming commands was found.',
       });
@@ -173,8 +191,12 @@ export class BackendManager {
       const pointer = await this.readPointer();
       this.status.releaseAvailable = true;
       this.status.releaseVersion = this.artifact.manifest.version;
-      this.status.updateAvailable = !this.status.available || pointer?.delivery !== 'release' ||
-        !pointer?.version || compareVersions(pointer.version, this.artifact.manifest.version) < 0;
+      const remote = this.artifact.manifest.version;
+      const comparison = pointer?.version ? compareVersions(pointer.version, remote) : -1;
+      // A local build is offered the exact official same version, but never an
+      // automatic downgrade to an older published release.
+      this.status.updateAvailable = !this.status.available || !pointer?.version || comparison < 0
+        || (pointer?.delivery === 'local' && pointer.version === remote);
       this.status.blockReason = this.status.available ? undefined : this.probeFailure;
     } catch (error) {
       this.artifact = undefined;
@@ -183,20 +205,126 @@ export class BackendManager {
       const message = (error as Error).message;
       this.status.blockReason = message.startsWith('No compatible Nexus backend release')
         ? message : `Backend release check failed: ${message}`;
+      // A read-only discovery failure is not an install attempt, so the fixed
+      // stage differs from install discovery and no state is mutated.
+      backendDiagnostic({ operation: 'update', event: 'failure', stage: 'update-check-failed', committed: false,
+        status: backendHttpStatus(error) });
     } finally { this.status.checking = false; }
     return this.current;
   }
 
-  async update(onStatus: () => void): Promise<void> {
-    await this.assertUpdateAllowed();
-    if (this.status.updating) throw new Error('A backend installation is already running.');
-    this.status.updating = true;
-    this.status.blockReason = undefined;
-    onStatus();
+  async prepareComponentUpdate(onStatus: () => void): Promise<PreparedComponentUpdate> {
+    const before = await fs.readFile(this.pointerFile, 'utf8').catch(() => undefined);
+    const externalRoot = this.status.externalRoot;
+    let pointer: ManagedPointer | undefined;
+    try { pointer = before === undefined ? undefined : JSON.parse(before) as ManagedPointer; } catch { /* Ineligible malformed pointer. */ }
+    const eligible = this.status.available && this.status.source === 'managed' && pointer?.delivery === 'release' && pointer.binaryPath === this.status.binaryPath;
+    const item = { id: 'backend', component: 'backend' as const, label: 'Backend', currentVersion: pointer?.version,
+      state: 'skipped' as 'ready' | 'skipped' | 'unchanged', reason: 'Only an installed managed backend release is updated automatically.' };
+    let target: BackendMutationTarget | undefined;
+    const same = async () => before === await fs.readFile(this.pointerFile, 'utf8').catch(() => undefined) && externalRoot === this.status.externalRoot;
+    if (!eligible || !pointer) return { item, isCurrent: same, apply: async () => { throw Error(item.reason); } };
+    const artifact = await discoverBackend(this.fetcher);
+    const newer = !pointer.version || compareVersions(pointer.version, artifact.manifest.version) < 0;
+    return {
+      item: { ...item, targetVersion: artifact.manifest.version, state: newer ? 'ready' : 'unchanged', reason: undefined },
+      isCurrent: same,
+      apply: async () => {
+        try { await this.performUpdate(onStatus, artifact, same); target = { commit: this.status.commit!, binaryPath: this.status.binaryPath!, version: this.status.version, delivery: this.status.delivery, linuxRunPatch: this.status.linuxRunPatch, recipeSha256: this.status.recipeSha256 }; }
+        catch (error) { if (error instanceof BackendMutationError && error.committed) target = error.target; throw error; }
+        return { committed: true };
+      },
+      reconcile: async () => {
+        const pointer = await this.readPointer();
+        if (!target || !pointer || (['binaryPath','commit','version','delivery','linuxRunPatch','recipeSha256'] as const).some(key=>pointer[key]!==target![key]) || !await this.matchesPreparedPayload(target,artifact)) throw Object.assign(Error('The activated backend changed. Check again.'), {retryable:false});
+        const refreshed = await this.refresh();
+        if (!refreshed.available || refreshed.source !== 'managed' || refreshed.binaryPath !== target.binaryPath) throw Error('The activated backend is not available.');
+        onStatus(); return {};
+      },
+    };
+  }
+
+  private async matchesPreparedPayload(target: BackendMutationTarget, artifact: BackendArtifact): Promise<boolean> {
+      try {
+          const directory = path.dirname(target.binaryPath), relative = path.relative(this.managedRoot, directory);
+          if (relative.startsWith('..') || path.isAbsolute(relative))
+              return false;
+          let parent = this.managedRoot;
+          for (const part of ['', ...relative.split(path.sep)]) {
+              parent = path.join(parent, part);
+              if (!(await fs.lstat(parent)).isDirectory())
+                  return false;
+          }
+          for (const [name, expected] of Object.entries(artifact.manifest.files)) {
+              const filename = path.join(directory, name), before = await fs.lstat(filename);
+              if (!before.isFile())
+                  return false;
+              const file = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+              try {
+                  const opened = await file.stat();
+                  if (opened.dev !== before.dev || opened.ino !== before.ino)
+                      return false;
+                  const digest = createHash('sha256');
+                  for await (const bytes of file.createReadStream({ autoClose: false }))
+                      digest.update(bytes);
+                  const after = await file.stat(), named = await fs.lstat(filename);
+                  if (digest.digest('hex') !== expected || before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || named.dev !== before.dev || named.ino !== before.ino || named.ctimeMs !== before.ctimeMs)
+                      return false;
+              }
+              finally {
+                  await file.close();
+              }
+          }
+          return true;
+      }
+      catch {
+          return false;
+      }
+  }
+
+  async importLocal(directory: unknown, onStatus: () => void): Promise<BackendStatus> {
+    if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw Error('Choose an absolute local backend build directory.');
+    let prepared: Awaited<ReturnType<typeof prepareLocalBackend>> | undefined;
     try {
-      // Refresh discovery at install time; do not use a stale candidate.
-      this.artifact = await discoverBackend(this.fetcher);
-      const binaryPath = await installBackend(this.managedRoot, this.artifact, this.fetcher, async cli => {
+      prepared = await prepareLocalBackend(directory, this.managedRoot);
+      await this.performUpdate(onStatus, prepared.artifact);
+      return this.current;
+    }
+    finally { if (prepared) await prepared.cleanup(); }
+  }
+
+  async update(onStatus: () => void): Promise<void> { return this.performUpdate(onStatus); }
+
+  private async performUpdate(onStatus: () => void, selected?: BackendArtifact, expectedCurrent?: () => Promise<boolean>): Promise<void> {
+    if (this.status.updating) {
+      backendDiagnostic({ operation: 'update', event: 'failure', stage: 'update-blocked', committed: false });
+      throw new Error('A backend installation is already running.');
+    }
+    // Reserve before the first awaited external activity check. Notification
+    // failures must also release this reservation.
+    this.status.updating = true;
+    this.reconciliationEpoch++;
+    this.status.blockReason = undefined;
+    let committed = false;
+    let failure: BackendMutationError | undefined;
+    let target: BackendMutationTarget | undefined;
+    let reconciled = false;
+    const started = performance.now();
+    // Fixed installer stages only. No messages, paths, URLs or child output.
+    let stage: BackendUpdateStage = 'update-blocked';
+    backendDiagnostic({ operation: 'update', event: 'start' });
+    try {
+      onStatus();
+      await this.assertUpdateAllowed();
+      // Keep this operation's verified target independent of later read-only
+      // release checks, which may replace the manager's discovery cache.
+      stage = 'update-stale';
+      if (expectedCurrent && !await expectedCurrent()) throw Error('The installed backend changed. Check again.');
+      stage = 'update-discovery';
+      const artifact = selected ?? await discoverBackend(this.fetcher);
+      if (!selected) this.artifact = artifact;
+      stage = 'update-storage';
+      const binaryPath = await installBackend(this.managedRoot, artifact, this.fetcher, async cli => {
         const caps = await this.validate(cli);
         if (!caps?.account || !caps.run || !caps.streaming || !caps.login || !caps.logout || !caps.download || !caps.externalAuth || !caps.packageSelection) {
           throw new Error('Backend validation failed. The prebuilt build requires glibc 2.35 or newer, OpenSSL 3 and D-Bus runtime libraries.');
@@ -206,96 +334,81 @@ export class BackendManager {
       }, () => this.assertUpdateAllowed(), message => {
         this.status.phase = message; this.emitLog('backend', message); onStatus();
       });
+      stage = 'update-blocked';
       await this.assertUpdateAllowed();
-      const manifest = this.artifact.manifest;
+      stage = 'update-stale';
+      if (expectedCurrent && !await expectedCurrent()) throw Error('The installed backend changed before activation. Check again.');
+      const manifest = artifact.manifest;
       const pointer: ManagedPointer = { commit: manifest.commit, binaryPath, builtAt: new Date().toISOString(),
-        linuxRunPatch: manifest.compatibility, recipeSha256: manifest.recipeSha256, version: manifest.version, delivery: 'release' };
+        linuxRunPatch: manifest.compatibility, recipeSha256: manifest.recipeSha256, version: manifest.version, delivery: artifact.delivery ?? 'release',
+        ...(artifact.delivery === 'local' ? { localBuild: true as const, diagnosticOnly: true as const, promotable: false as const } : {}) };
+      target = { commit: pointer.commit, binaryPath, version: pointer.version, delivery: pointer.delivery, linuxRunPatch: pointer.linuxRunPatch, recipeSha256: pointer.recipeSha256 };
       const temporary = `${this.pointerFile}.${randomUUID()}.tmp`;
-      try { await fs.writeFile(temporary, JSON.stringify(pointer, null, 2)); await fs.rename(temporary, this.pointerFile); }
-      finally { await fs.rm(temporary, { force: true }); }
-      await this.refresh();
-      Object.assign(this.status, { releaseAvailable: true, releaseVersion: manifest.version, updateAvailable: false, phase: 'Backend is ready.' });
-    } catch (error) {
-      this.status.blockReason = (error as Error).message;
-      this.status.phase = 'Backend update failed; the previous backend was kept.';
-      throw error;
-    } finally { this.status.updating = false; onStatus(); }
-  }
-
-  async rebuild(onStatus: () => void): Promise<void> {
-    await this.assertUpdateAllowed();
-    if (this.status.updating) throw new Error('A backend installation is already running.');
-    if (!this.status.prerequisites.git || !this.status.prerequisites.cargo || !this.status.prerequisites.rustc || !this.status.prerequisites.protoc) {
-      throw new Error('Git, Cargo, Rust, or protoc is missing. Check the build dependencies in Settings.');
-    }
-    this.status.updating = true;
-    this.status.blockReason = undefined;
-    onStatus();
-    await fs.mkdir(path.join(this.managedRoot, 'releases'), { recursive: true });
-    const staging = path.join(this.managedRoot, `.staging-${randomUUID()}`);
-    const log = (line: string) => this.emitLog('backend', line);
-    try {
-      for (const patch of backendLock.patches) {
-        if (createHash('sha256').update(await fs.readFile(path.join(backendAssets, patch.file))).digest('hex') !== patch.sha256) throw new Error('Backend patch checksum mismatch.');
+      stage = 'update-commit';
+      try {
+        await fs.writeFile(temporary, JSON.stringify(pointer, null, 2));
+        await fs.rename(temporary, this.pointerFile);
+        committed = true;
+        this.reconciliationEpoch++;
+      } finally {
+        // Rename consumed our temporary path. Never remove a replacement file
+        // created at that name after publication.
+        if (!committed) await fs.rm(temporary, { force: true });
       }
-      log(`Cloning the pinned Xodus source ${backendLock.commit}…`);
-      let result = await run('git', ['clone', '--no-checkout', REPOSITORY, staging], { onLine: log });
-      if (result.code !== 0) throw new Error(`git clone exited with code ${result.code}`);
-      result = await run('git', ['-C', staging, 'checkout', '--detach', backendLock.commit], { onLine: log });
-      if (result.code !== 0) throw new Error('Pinned backend checkout failed.');
-      const commit = (await run('git', ['-C', staging, 'rev-parse', 'HEAD'])).output.trim();
-      if (commit !== backendLock.commit || createHash('sha256').update(await fs.readFile(path.join(staging, 'Cargo.lock'))).digest('hex') !== backendLock.cargoLockSha256) throw new Error('Backend source lock mismatch.');
-      for (const patch of backendLock.patches) {
-        const patchFile = path.join(staging, `.nexus-${patch.file}`);
-        await fs.writeFile(patchFile, await fs.readFile(path.join(backendAssets, patch.file)));
-        log(`Applying ${patch.file}…`);
-        result = await run('git', ['-C', staging, 'apply', '--check', patchFile], { onLine: log, maxOutput: 100_000 });
-        if (result.code !== 0) throw new Error(`The pinned backend patch ${patch.file} does not apply; the previous backend remains active.`);
-        result = await run('git', ['-C', staging, 'apply', patchFile], { onLine: log, maxOutput: 100_000 });
-        if (result.code !== 0) throw new Error(`Backend patch ${patch.file} could not be applied.`);
+      Object.assign(this.status, { available: false, capabilities: EMPTY_CAPABILITIES, source: 'managed', binaryPath, commit: manifest.commit,
+        linuxRunPatch: manifest.compatibility, recipeSha256: manifest.recipeSha256,
+        version: manifest.version, delivery: artifact.delivery ?? 'release', phase: 'Backend activated; checking availability.' });
+      stage = 'update-confirm';
+      backendDiagnostic({ operation: 'update', event: 'diagnostic', stage: 'update-confirm' });
+      const refreshed = await this.refresh();
+      if (!refreshed.available || refreshed.source !== 'managed' || refreshed.binaryPath !== binaryPath) {
+        throw new Error('The selected backend could not be confirmed after activation.');
       }
-      const target = path.join(staging, 'target');
-      log(`Building ${commit.slice(0, 10)} with Cargo…`);
-      result = await run('cargo', ['build', '--locked', '--release', '--no-default-features', '-p', 'xodus-cli', '-p', 'xodus-service'], {
-        cwd: staging,
-        env: { ...process.env, CARGO_TARGET_DIR: target },
-        onLine: log,
-        maxOutput: 5_000_000,
-      });
-      if (result.code !== 0) throw new Error(`cargo build exited with code ${result.code}`);
-      const builtCli = path.join(target, 'release', 'xodus-cli');
-      const capabilities = await this.validate(builtCli);
-      if (!capabilities?.login || !capabilities.streaming || !capabilities.account || !capabilities.externalAuth || !capabilities.packageSelection) throw new Error('The built backend failed command validation.');
-      const runHelp = await run(builtCli, ['run', '--help'], { maxOutput: 100_000 });
-      if (runHelp.code !== 0 || !runHelp.output.includes('--materialize-chain')) throw new Error('The built backend lacks launch-chain support.');
-      await this.assertUpdateAllowed();
-
-      const releaseDir = path.join(this.managedRoot, 'releases', `${commit}-${LINUX_RUN_RELEASE}-local-${randomUUID()}`);
-      await fs.mkdir(releaseDir, { recursive: true });
-      const managedCli = path.join(releaseDir, 'xodus-cli');
-      await fs.copyFile(builtCli, managedCli);
-      await fs.chmod(managedCli, 0o755);
-      const builtService = path.join(target, 'release', 'xodus-service');
-      await fs.copyFile(builtService, path.join(releaseDir, 'xodus-service'));
-      await fs.chmod(path.join(releaseDir, 'xodus-service'), 0o755);
-      await fs.writeFile(path.join(releaseDir, 'metadata.json'), JSON.stringify({ commit, builtAt: new Date().toISOString(), capabilities, linuxRunPatch: LINUX_RUN_PATCH }, null, 2));
-      const pointer: ManagedPointer = { commit, binaryPath: managedCli, builtAt: new Date().toISOString(), linuxRunPatch: LINUX_RUN_PATCH,
-        recipeSha256: backendRecipeSha256, version: backendLock.version, delivery: 'local' };
-      const pointerTmp = `${this.pointerFile}.tmp`;
-      await fs.writeFile(pointerTmp, JSON.stringify(pointer, null, 2));
-      await fs.rename(pointerTmp, this.pointerFile);
-      Object.assign(this.status, {
-        available: true, source: 'managed', binaryPath: managedCli, commit,
-        upstreamCommit: commit, updateAvailable: false, capabilities, linuxRunPatch: LINUX_RUN_PATCH,
-      });
-      log('The new backend passed validation and was activated atomically. Older builds were preserved.');
+      reconciled = true;
+      if (artifact.delivery === 'local') {
+        // The local build is not a published release. A later explicit check
+        // may offer the exact official same version, never an older downgrade.
+        Object.assign(this.status, { releaseAvailable: false, releaseVersion: undefined, updateAvailable: false, phase: 'Backend is ready.' });
+      }
+      else {
+        // A concurrent read-only check may have discovered a newer release.
+        const cached = this.artifact?.manifest;
+        const latest = cached && compareVersions(cached.version, manifest.version) >= 0 ? cached : manifest;
+        Object.assign(this.status, { releaseAvailable: Boolean(latest), releaseVersion: latest?.version,
+          updateAvailable: Boolean(latest && compareVersions(manifest.version, latest.version) < 0), phase: 'Backend is ready.' });
+      }
+      backendDiagnostic({ operation: 'update', event: 'diagnostic', stage: 'update-ready' });
     } catch (error) {
-      this.status.blockReason = (error as Error).message;
-      throw error;
+      const failureStage = error instanceof BackendInstallError ? error.stage : stage;
+      backendDiagnostic({ operation: 'update', event: 'failure', stage: failureStage, committed,
+        status: error instanceof BackendInstallError ? error.status : backendHttpStatus(error) });
+      if (committed && !reconciled) Object.assign(this.status, { available: false, capabilities: EMPTY_CAPABILITIES,
+        source: 'managed', ...target });
+      failure = this.mutationFailure('update', error, committed, target);
+      throw failure;
     } finally {
       this.status.updating = false;
-      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
-      onStatus();
+      backendDiagnostic({ operation: 'update', event: 'exit', code: reconciled ? 0 : -1, elapsedMs: performance.now() - started });
+      try { this.notifyMutation('update', onStatus, committed, target, failure); }
+      catch (error) {
+        backendDiagnostic({ operation: 'update', event: 'failure', stage: 'update-notify', committed });
+        throw error;
+      }
     }
   }
+
+  private mutationFailure(operation: BackendMutation, error: unknown, committed: boolean, target?: BackendMutationTarget): BackendMutationError {
+    const failure = new BackendMutationError(error, operation, committed, target);
+    this.status.blockReason = failure.message;
+    this.status.phase = committed ? 'Backend activated; finishing setup needs attention.' : 'Backend update failed; no new backend was activated.';
+    return failure;
+  }
+
+  private notifyMutation(operation: BackendMutation, onStatus: () => void, committed: boolean, target?: BackendMutationTarget, failure?: BackendMutationError): void {
+    try { onStatus(); } catch (error) {
+      const reason = failure ? new AggregateError([failure, error], failure.message + ' Status notification failed.') : error;
+      throw this.mutationFailure(operation, reason, committed, target);
+    }
+  }
+
 }

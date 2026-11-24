@@ -7,8 +7,9 @@ import { ui } from './i18n';
 import './notifications.css';
 
 export function useNotifications(data:AppSnapshot) {
-  const identity=JSON.stringify([data.auth.stored===true?data.auth.username:null,data.backend.binaryPath]);
-  const storageKey=data.auth.stored===true&&data.auth.username?'nexus.notifications.v1.'+encodeURIComponent(data.auth.username):undefined;
+  const account=data.auth.player??(data.auth.stored===true?data.auth.username:undefined);
+  const identity=JSON.stringify([account??null,data.backend.binaryPath]);
+  const storageKey=account?'nexus.notifications.v1.'+encodeURIComponent(account):undefined;
   const [reads,setReads]=useState<{identity:string;keys:string[]}>({identity:'',keys:[]});
   const [inbox,setInbox]=useState<{identity:string;value:XboxConversation[]}>();
   const [names,setNames]=useState<{identity:string;value:Map<string,string>}>();
@@ -16,7 +17,7 @@ export function useNotifications(data:AppSnapshot) {
   const snapshot=useRef(data);snapshot.current=data;
   const currentIdentity=useRef(identity);currentIdentity.current=identity;
   const lastViewed=useRef<{identity:string;keys:string[]}>({identity,keys:[]});
-  const supported=data.auth.stored===true&&!data.auth.running&&data.backend.available&&data.backend.capabilities.nativeSocial===true;
+  const supported=Boolean(account)&&!data.auth.running&&data.backend.available&&data.backend.capabilities.nativeSocial===true;
   useEffect(()=>{
     let keys:string[]=[];
     try{if(storageKey)keys=parseNotificationReads(localStorage.getItem(storageKey));}catch{/* Read state is optional if storage is unavailable. */}
@@ -36,7 +37,7 @@ export function useNotifications(data:AppSnapshot) {
     if(!supported)return;
     let active=true;
     const receive=(state:Awaited<ReturnType<typeof window.launcher.getXboxChatReads>>)=>{
-      if(active&&currentIdentity.current===identity&&state&&state.account===data.auth.username&&state.binary===data.backend.binaryPath)
+      if(active&&currentIdentity.current===identity&&state&&state.account===account&&state.binary===data.backend.binaryPath)
         remember(parseNotificationReads(JSON.stringify(state.keys)));
     };
     const unsubscribe=window.launcher.onXboxChatReads(receive);
@@ -82,13 +83,13 @@ export function useNotifications(data:AppSnapshot) {
     return()=>{active=false;clearInterval(timer);};
   },[identity]);
   const notices=notificationItems(data,supported&&inbox?.identity===identity?inbox.value:undefined,names?.identity===identity?names.value:new Map(),reads.identity===identity?reads.keys:[]);
-  return {notices,readKeys:reads.identity===identity?reads.keys:[],failed:supported&&failed,unsupported:data.auth.stored===true&&!data.backend.capabilities.nativeSocial,
+  return {notices,readKeys:reads.identity===identity?reads.keys:[],failed:supported&&failed,unsupported:Boolean(account)&&!data.backend.capabilities.nativeSocial,
     acknowledge:(notice:Notice)=>{if(notice.kind==='update')remember([notice.key]);},
     viewed:(peer:string,ids:string[])=>{
       const keys=ids.map(id=>messageNoticeKey(peer,id));
       lastViewed.current={identity,keys};remember(keys);
-      if(supported&&data.auth.username&&data.backend.binaryPath)
-        void window.launcher.viewedXboxChat(data.auth.username,data.backend.binaryPath,peer,ids).catch(()=>{/* Local read state is still retained. */});
+      if(supported&&account&&data.backend.binaryPath)
+        void window.launcher.viewedXboxChat(account,data.backend.binaryPath,peer,ids).catch(()=>{/* Local read state is still retained. */});
     }};
 }
 
@@ -98,20 +99,22 @@ export function NotificationBell({notices,failed=false,unsupported=false,openNot
   const [open,setOpen]=useState(false),root=useRef<HTMLDivElement>(null),bell=useRef<HTMLButtonElement>(null);
   const count=notices.filter(notice=>notice.unread).length;
   const toggle=(value:boolean)=>{setOpen(value);openNotice?.(value);};
+  // Restore after React removes the popup and pad navigation leaves its scope.
+  const close=()=>{toggle(false);requestAnimationFrame(()=>bell.current?.focus({preventScroll:true}));};
   useEffect(()=>{
     if(!open)return;
     root.current?.querySelector<HTMLElement>('[data-gamepad-initial]')?.focus({preventScroll:true});
     const outside=(event:PointerEvent)=>{if(!root.current?.contains(event.target as Node))toggle(false);};
-    const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();toggle(false);bell.current?.focus({preventScroll:true});}};
+    const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();close();}};
     document.addEventListener('pointerdown',outside);window.addEventListener('keydown',escape,true);
     return()=>{document.removeEventListener('pointerdown',outside);window.removeEventListener('keydown',escape,true);};
   },[open]);
   return <div className="notifications" ref={root}>
-    <button ref={bell} className="notification-bell" aria-label={count?ui('notifications.unread',{count}):ui('notifications.title')} title={ui('notifications.title')} aria-expanded={open} aria-controls={open?'notification-panel':undefined} onClick={()=>toggle(!open)}>
+    <button ref={bell} className="notification-bell" aria-label={count?ui('notifications.unread',{count}):ui('notifications.title')} data-tooltip={ui('notifications.title')} aria-expanded={open} aria-controls={open?'notification-panel':undefined} onClick={()=>toggle(!open)}>
       <Bell aria-hidden="true"/>{count>0?<span className="notification-badge" aria-hidden="true">{notificationBadge(count)}</span>:null}
     </button>
     {open?<section id="notification-panel" className="notification-panel" role="dialog" aria-label={ui('notifications.title')} data-gamepad-layer>
-      <header><h2>{ui('notifications.title')}</h2><button data-gamepad-initial data-gamepad-cancel aria-label={ui('notifications.close')} onClick={()=>{toggle(false);bell.current?.focus({preventScroll:true});}}><X/></button></header>
+      <header><h2>{ui('notifications.title')}</h2><button data-gamepad-initial data-gamepad-cancel aria-label={ui('notifications.close')} onClick={()=>{close();}}><X/></button></header>
       {failed?<p role="status">{ui('notifications.refresh_failed')}</p>:unsupported?<p>{ui('notifications.unsupported')}</p>:null}
       {!notices.length?<p>{ui('notifications.empty')}</p>:<ul>{notices.map(notice=><li key={notice.key}>
         <button className={notice.unread?'unread':''} onClick={()=>{toggle(false);onSelect(notice);}}>

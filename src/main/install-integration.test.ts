@@ -2,24 +2,32 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { demoSnapshot } from '../shared/demo-data.js';
 import { StateStore } from './store.js';
 import { GameContent } from './game-content.js';
+import { ContentCatalog } from './content-catalog.js';
 import { DownloadCleanup } from './download-cleanup.js';
+import { accountCacheKey } from './offline-identity.js';
+import { offerSteamHandoff } from './steam-launch-context.js';
 
 // Run the real IPC/admission/download lifecycle with synthetic child processes.
 // No account, executable, network, installed game or production profile is used.
 const h = vi.hoisted(() => ({
   root: '', wine: '', backend: {} as any, runtime: {} as any,
   savedPausedId: '',
+  updateSignals: [] as AbortSignal[],
+  updateReplies: [] as any[],
+  updateStops: vi.fn(async () => {}),
   handlers: new Map<string, (...args: any[]) => any>(),
   events: new Map<string, (...args: any[]) => any>(),
   downloads: [] as { args: string[]; progress: (paused?: boolean, phase?: string) => void; finish: (code: number) => void }[],
   installQueue: undefined as undefined | { settled(id: string): Promise<void> },
-  game: undefined as undefined | { finish: (code?: number, output?: string) => void },
+  game: undefined as undefined | { finish: (code?: number, output?: string) => void; line: (line: string) => void },
   quit: vi.fn(), maximize: vi.fn(),
   blockDisplay: vi.fn(() => 7), releaseDisplay: vi.fn(() => true),
+  cleanupGate: undefined as Promise<void> | undefined, wrapperGate: undefined as Promise<void> | undefined,
+  errors: [] as string[], stops: 0,
   steamProfiles: [] as string[], steamIsRunning: true,
   liveImport: vi.fn(), offlineImport: vi.fn(), showMessage: vi.fn(),
   showSave: vi.fn(),
@@ -27,6 +35,7 @@ const h = vi.hoisted(() => ({
   notifications: [] as { title: string; body: string }[],
   holdCancellation: false,
   holdAccountReads: false,
+  cloudSupported: false,
   contentSupported: false,
   discoverySupported: false,
   offlineRuntimeSupported: false,
@@ -35,13 +44,20 @@ const h = vi.hoisted(() => ({
   launchEnvironments: [] as NodeJS.ProcessEnv[],
   launchArguments: [] as string[][],
   backendRefreshes: 0, runtimeRefreshes: 0,
-  accountRequests: 0,
+  retentionEnables:0, retentionEnabled:false, retentionFailure:false,
+  accountRequests: 0, accountPlayer: undefined as string | undefined,
+  trayCreated: vi.fn(), trayDestroyed: vi.fn(),
   prefixLocales: [] as (string | undefined)[],
   planOverrides: new Map<string, any>(),
   libraryRows: [] as any[],
   accountReads: [] as ((result: { code: number; output: string }) => void)[],
   posters: vi.fn(async (ids: string[]) => new Map(ids.map(id => [id, `https://store-images.s-microsoft.com/${id}`]))),
 }));
+vi.mock('./saved-accounts.js',async original=>({...(await original<typeof import('./saved-accounts.js')>()),
+ enableSavedAccounts:async()=>{h.retentionEnables++;if(h.retentionFailure)throw Error('Account retention could not be verified.');h.retentionEnabled=true;},
+ listSavedAccounts:async()=>({accounts:h.retentionEnabled?['sample@example.test']:[],active:'sample@example.test',enabled:h.retentionEnabled}),
+}));
+vi.mock('./launcher-tray-desktop.js',()=>({desktopTrayAvailable:()=>true}));
 vi.mock('electron', () => ({
   Notification: class { static isSupported() { return true; } constructor(private options: { title: string; body: string }) {} on() {} show() { h.notifications.push(this.options); } },
   app: { requestSingleInstanceLock: () => true, getPath: (name: string) => path.join(h.root, name),
@@ -49,15 +65,24 @@ vi.mock('electron', () => ({
     whenReady: () => Promise.resolve(), getVersion: () => '0.0.0', isPackaged: false, emit:vi.fn(), quit: h.quit },
   ipcMain: { handle: (name: string, callback: (...args: any[]) => any) => h.handlers.set(name, callback),removeHandler:(name:string)=>h.handlers.delete(name) },
   BrowserWindow: class { webContents = { on: vi.fn(), send: vi.fn(), setWindowOpenHandler: vi.fn() };
-    on() {} once() {} show() {} focus() {} maximize = h.maximize; isDestroyed() { return false; } async loadFile() {} },
+    on() {} once() {} show() {} hide() {} isVisible() {return true;} focus() {} maximize = h.maximize; isDestroyed() { return false; } async loadFile() {} },
   screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
   globalShortcut:{register:vi.fn(()=>false),unregister:vi.fn()},
-  dialog: { showMessageBox: h.showMessage, showSaveDialog: h.showSave }, nativeImage: {}, shell: { trashItem: h.trash }, powerSaveBlocker: { start: h.blockDisplay, stop: h.releaseDisplay },
+  dialog: { showMessageBox: (...args:any[]) => { h.errors.push(args[1]?.message); return h.showMessage(...args); }, showSaveDialog: h.showSave }, nativeImage: {createFromPath:()=>({isEmpty:()=>false})}, Menu:{buildFromTemplate:(items:unknown)=>items}, Tray:class {constructor(){h.trayCreated();}setToolTip(){}on(){}setContextMenu(){}destroy(){h.trayDestroyed();}}, shell: { trashItem: h.trash }, powerSaveBlocker: { start: h.blockDisplay, stop: h.releaseDisplay },
 }));
 vi.mock('./backend.js', () => ({ LINUX_RUN_PATCH: 'test-patch', BackendManager: class {
   get current() { return h.backend; } async refresh() {h.backendRefreshes++;} async checkUpdate() {} async externalDownloadRunning() { return false; }
   setExternalRoot() {} } }));
-vi.mock('./runtime.js', () => ({ RuntimeManager: class { get current() { return h.runtime; } async refresh() {h.runtimeRefreshes++;} async checkNexus() {} setRoot() {} } }));
+vi.mock('./runtime.js', async original => {
+  const actual = await original<typeof import('./runtime.js')>();
+  // Keep actual mutation ownership and root binding; only component probes are
+  // replaced, so Settings exercises the same reservation as production IPC.
+  return { RuntimeManager: class extends actual.RuntimeManager {
+    get current() { return { ...h.runtime, runtimeRoot: super.current.runtimeRoot, updating: super.current.updating }; }
+    async refresh() { h.runtimeRefreshes++; return this.current; }
+    async checkNexus() { return this.current; }
+  } };
+});
 vi.mock('./catalog.js', () => ({ CatalogService: class { async artwork() { return new Map(); } posters = h.posters; } }));
 vi.mock('./account-profile.js', () => ({ AccountProfile: class { async select() {} cancel() {} } }));
 vi.mock('./launcher-update.js', () => ({ LauncherUpdater: class { state = {}; async initialize() {} async check() {} cancel() {} } }));
@@ -76,7 +101,7 @@ vi.mock('./install-queue.js', async original => {
 // Deletion is restricted to disposable fixture directories, never real games.
 vi.mock('./game-delete.js', () => ({ deleteGameDirectory: (target: { path: string }) => h.deleteFiles(target.path) }));
 vi.mock('./session-environment.js', () => ({ prepareGameModeKeyring: async () => 'skipped' }));
-vi.mock('./game-shortcuts.js', () => ({ shortcutArguments: () => ({}), shortcutInstanceData: () => ({}), shortcutInstanceRequest: () => ({}),
+vi.mock('./game-shortcuts.js', () => ({ shortcutArguments: () => ({}), shortcutInstanceData: () => ({}), shortcutInstanceRequest: (data:any) => data.nexusShortcut?.request ?? {},
   GameShortcuts: class { async initialize() {} remove = h.removeShortcut; async steamDesktop() { return { file: path.join(h.root, 'game.desktop'),
     launch: { icon: h.wine, title: 'Sample game', executable: '/bin/sh', options: 'fixture', directory: h.root, identity: 'fixture' } }; } } }));
 vi.mock('./steam-shortcuts.js', async original => ({ ...await original<typeof import('./steam-shortcuts.js')>(),
@@ -89,29 +114,37 @@ vi.mock('./install-plan.js', async original => ({ ...await original<typeof impor
     schema:1,rootProductId:productId,market,status:'ready',choices:[{productId,contentId:'11111111-1111-4111-8111-111111111111',title:'Synthetic game',kind:'Game',platform:'Windows.Desktop',packageFormat:'MSIXVC',supported:true}],
   }),
 }));
-vi.mock('./xodus-service.js', () => ({ cloudSaveRuntime: async () => false, unbridgedCloudSaveRuntime: async () => false,
+vi.mock('./xodus-service.js', () => ({ cloudSaveRuntime: async () => h.cloudSupported, unbridgedCloudSaveRuntime: async () => false,
   gameInviteRuntime: async () => false,
   offlineIdentityRuntime: async () => h.offlineRuntimeSupported,
-  selectedWinePath: () => h.wine, storeContentRuntime: async () => h.contentSupported, storeDiscoveryRuntime: async () => h.discoverySupported, startXodusService: vi.fn() }));
+  selectedWinePath: () => h.wine, storeContentRuntime: async () => h.contentSupported, storeDiscoveryRuntime: async () => h.discoverySupported, startXodusService: async () => ({ socketPath: '/synthetic-updates', stop: h.updateStops }) }));
+vi.mock('./game-updates.js', () => ({ queryGameUpdate: async (_socket: string, _id: string, _version: string, signal: AbortSignal) => {
+  h.updateSignals.push(signal);
+  if (h.updateReplies.length) return h.updateReplies.shift();
+  return new Promise((_resolve, reject) => {
+    const abort = () => reject(Error('Update check cancelled.'));
+    if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+  });
+} }));
 // No public connectivity probes from an account-free launch integration fixture.
 vi.mock('./connectivity.js',()=>({ConnectivityMonitor:class {
   get current(){return {state:h.connectivityState};} start(){} stop(){}
   async check(){return this.current;}
 }}));
 vi.mock('./proton.js', () => ({ prepareProtonRunner: async () => undefined, syncPrefixUserLocale: async (_wine: string, _prefix: string, locale: string | undefined) => { h.prefixLocales.push(locale); }, syncUnrealCultureGameIni: async () => {} }));
-vi.mock('./game-wrapper.js', () => ({ prepareGameWrapper: async () => ({ command: h.wine, cleanup: async () => {} }) }));
+vi.mock('./game-wrapper.js', () => ({ prepareGameWrapper: async () => { await h.wrapperGate; return { command: h.wine, cleanup: async () => {} }; } }));
 vi.mock('./process.js', () => ({
-  run: async (_command: string, args: string[]) => ({ code: 0, output: args[0] === 'account' ? JSON.stringify({ stored: true, username: 'sample@example.test' }) : '' }),
+  run: async (_command: string, args: string[]) => ({ code: 0, output: args[0] === 'account' ? JSON.stringify({ stored: true, username: 'sample@example.test', player: h.accountPlayer ? { username: h.accountPlayer } : null }) : '' }),
   spawnTracked: (_command: string, args: string[], options: any) => {
     if (args[0] === 'library') { h.libraryReads++;return {
       child: { kill: vi.fn(), stderr: { on() {}, removeListener() {} } },
       result: Promise.resolve({code:0,output:JSON.stringify({schema:1,account:'sample@example.test',market:'US',checkedAt:new Date().toISOString(),entitlements:h.libraryRows})}),
     }; }
     if (args[0] === 'account') { h.accountRequests++;return {
-      child: { kill: vi.fn(() => true) },
+      child: { kill: vi.fn(() => true), stdin: { end: vi.fn() } },
       result: h.holdAccountReads
         ? new Promise<{ code: number; output: string }>(resolve => { h.accountReads.push(resolve); })
-        : Promise.resolve({ code: 0, output: JSON.stringify({ stored: true, username: 'sample@example.test' }) }),
+        : Promise.resolve({ code: 0, output: JSON.stringify({ stored: true, username: 'sample@example.test', player: h.accountPlayer ? { username: h.accountPlayer } : null }) }),
     }; }
     let resolve!: (result: { code: number; output: string }) => void, sequence = 0;
     const result = new Promise<{ code: number; output: string }>(done => { resolve = done; });
@@ -121,18 +154,47 @@ vi.mock('./process.js', () => ({
     return { child: { stdin: { on() {}, write: (line: string) => progress(JSON.parse(line).command === 'pause') }, kill: (signal: string) => { h.signals.push(signal); if (!h.holdCancellation) resolve({ code: 130, output: '' }); return true; } }, result };
   },
 }));
-vi.mock('./game-process.js', () => ({ spawnGameProcess: async (_command:string,_args:string[],options:{env:NodeJS.ProcessEnv}) => {
+vi.mock('./game-process.js', () => ({ spawnGameProcess: async (_command:string,_args:string[],options:{env:NodeJS.ProcessEnv; onLine: (line: string) => void}) => {
   h.launchArguments.push([..._args]);
   h.launchEnvironments.push({...options.env});
   let resolve!: (result: { code: number; output: string }) => void;
   const result = new Promise<{ code: number; output: string }>(done => { resolve = done; });
-  h.game = { finish: (code = 0, output = '') => resolve({ code, output }) };
-  return { child: {}, result, cleanup: async () => {}, stop: async () => resolve({ code: 0, output: '' }), forceStop: async () => {} };
+  h.game = { line: options.onLine, finish: (code = 0, output = '') => resolve({ code, output }) };
+  return { child: {}, result, cleanup: async () => { await h.cleanupGate; }, stop: async () => { h.stops++; resolve({ code: 0, output: '' }); }, forceStop: async () => {} };
 } }));
 
 const ipc = (name: string, ...args: any[]) => h.handlers.get(name)!(undefined, ...args);
 const snapshot = () => ipc('get-snapshot');
 const install = (letter: string, destination = path.join(h.root, `download-${letter}`)) => ipc('start-install', { productId: `9${letter.repeat(11)}`, title: `Sample ${letter}`, destination });
+const family = 'nexus-cachyos';
+const familyBuild = 'b'.repeat(64);
+const familyCommit = 'a'.repeat(40);
+async function installFamilyFixture(id: 'nexus' | 'nexus-cachyos' = family, repository = 'domsvoboda/nexus-runtime-cachyos', commit = familyCommit, build = familyBuild) {
+  const release = path.join(h.root, 'runtime/variants', id, 'releases', build);
+  const files: Record<string,string> = {};
+  const payload = ['proton','files/bin/wine','files/bin/wineserver','files/bin/wine.nexus-original',
+    ...['PlayFabGameSave.dll','gaming-services-version.exe','package-registration.exe'].map(name => 'files/share/xodus-nexus/compat/' + name),
+    ...['x86_64','i386'].flatMap(cpu => ['xgameruntime.dll','winhttp.dll','libnghttp2.dll'].map(name => `files/lib/wine/${cpu}-windows/${name}`))];
+  for (const name of payload) {
+    const file = path.join(release, name); await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'synthetic inert runtime fixture', { mode: 0o755 });
+    files[name] = createHash('sha256').update('synthetic inert runtime fixture').digest('hex');
+  }
+  await fs.mkdir(path.join(release, 'files/share/default_pfx'), { recursive: true });
+  const metadata = JSON.stringify({ schema:1, sourceLockSha256:'c'.repeat(64), sourceGraph:{ proton:commit } });
+  await fs.writeFile(path.join(release, 'XODUS_NEXUS_PATCH.json'), metadata);
+  files['XODUS_NEXUS_PATCH.json'] = createHash('sha256').update(metadata).digest('hex');
+  const manifest = JSON.stringify({ schema:1, family:id, buildId:build, sourceRepository:repository,
+    sourceCommit:commit, arch:'x64', prefixSchema:1, sourceLockSha256:'c'.repeat(64), files });
+  await fs.writeFile(path.join(release, 'nexus-family.json'), manifest);
+  await fs.writeFile(path.join(h.root, 'runtime/variants', id, 'current.json'), JSON.stringify({
+    schema:1, family:id, buildId:build, sourceRepository:repository,
+    sourceCommit:commit, manifestSha256: createHash('sha256').update(manifest).digest('hex') }));
+}
+async function setDefaultRuntime() {
+  const game = snapshot().games.find((entry:any) => entry.id === 'sample');
+  if (game.runtime !== 'default') await ipc('update-game', 'sample', { runtime:'default' });
+}
 
 it('saves interface language without probing account, restarting components or altering game language and market', async () => {
   const before = await snapshot();
@@ -165,6 +227,23 @@ it('saves shader cache limits through real IPC without refreshing components or 
   expect(snapshot().settings.shaderCacheLimitGiB).toBe(8.5);expect([h.backendRefreshes,h.runtimeRefreshes]).toEqual(refreshes);
 });
 
+it('opts into retention before persisting presentation and hides it without changing credentials',async()=>{
+ const prior=h.backend.capabilities.savedAccounts;h.backend.capabilities.savedAccounts=true;
+ try{
+  expect(snapshot().settings.multiAccountEnabled).toBe(false);
+  h.retentionFailure=true;await expect(ipc('update-settings',{multiAccountEnabled:true})).rejects.toThrow('could not be verified');
+  expect(snapshot().settings.multiAccountEnabled).toBe(false);
+  h.retentionFailure=false;await ipc('update-settings',{multiAccountEnabled:true});
+  expect(snapshot().settings.multiAccountEnabled).toBe(true);expect(snapshot().auth.savedAccountsEnabled).toBe(true);
+  const beforeReset=h.retentionEnables;h.retentionEnabled=false;await ipc('account-refresh');
+  expect(snapshot().settings.multiAccountEnabled).toBe(true);expect(snapshot().auth.savedAccountsEnabled).toBe(false);
+  await ipc('update-settings',{multiAccountEnabled:true});expect(h.retentionEnables).toBe(beforeReset+1);expect(snapshot().auth.savedAccountsEnabled).toBe(true);
+  const enabled=h.retentionEnables,reads=h.accountRequests,auth=snapshot().auth;
+  await ipc('update-settings',{multiAccountEnabled:false});
+  expect(h.retentionEnables).toBe(enabled);expect(h.accountRequests).toBe(reads);expect(snapshot().auth).toEqual(auth);expect(h.retentionEnabled).toBe(true);
+ } finally {h.retentionFailure=false;h.backend.capabilities.savedAccounts=prior;}
+});
+
 it('saves ordinary launcher preferences without re-probing components or reading the account', async () => {
   const before=snapshot(),refreshes=[h.backendRefreshes,h.runtimeRefreshes],accounts=h.accountRequests;
   const settings={...before.settings,installRoot:path.join(h.root,'future-games'),parallelDownloads:6,verboseLogs:!before.settings.verboseLogs};
@@ -190,15 +269,20 @@ it.each(['market','winePath','externalXodusRoot','runtimeRoot'] as const)
     await ipc('update-settings',{[key]:selected});
     expect([h.backendRefreshes,h.runtimeRefreshes]).toEqual(counts.map(n=>n+1));
     expect(h.accountRequests).toBe(accounts+1);expect(snapshot().settings[key]).toBe(selected);
+    expect(snapshot().runtime.updating).toBe(false);
+    expect(snapshot().runtime.runtimeRoot).toBe(snapshot().settings.runtimeRoot);
   }finally{await ipc('update-settings',{[key]:previous});}
 });
 
 beforeAll(async () => {
+  vi.stubEnv('SteamGameId', '');
   h.root = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-install-integration-'));
   h.wine = path.join(h.root, 'runtime', 'wine'); await fs.mkdir(path.dirname(h.wine)); await fs.writeFile(h.wine, 'fixture', { mode: 0o700 });
   const data = demoSnapshot(); h.backend = { ...data.backend, capabilities: { ...data.backend.capabilities, packageSelection: true, streamingUpdateRecovery: true }, binaryPath: path.join(h.root, 'synthetic-cli'), linuxRunPatch: 'test-patch' }; h.runtime = data.runtime;
   const store = new StateStore(path.join(h.root, 'userData'));
   await store.setSettings({ firstRunCompleted: true, market: 'US', runtimeRoot: path.join(h.root, 'runtime'), winePath: h.wine });
+  await installFamilyFixture('nexus', 'domsvoboda/nexus-runtime', 'd'.repeat(40), 'e'.repeat(64));
+  await installFamilyFixture();
   h.savedPausedId=randomUUID();
   const partial={id:h.savedPausedId,kind:'install' as const,productId:'9TTTTTTTTTTT',title:'Paused fixture',
     selectedContentId:'11111111-1111-4111-8111-111111111111',selectionMarket:'US',destination:path.join(h.root,'resumable-partial'),
@@ -236,6 +320,7 @@ afterAll(async () => {
   h.game?.finish(); for (const job of h.downloads) job.finish(130);
   await new Promise(resolve => setTimeout(resolve, 50));
   await fs.rm(h.root, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 it('diagnostic IPC previews without a save/upload, saves exactly reviewed text and honors cancellation', async () => {
@@ -266,7 +351,7 @@ it('real account-refresh IPC shares status reads and cannot publish a late old b
     h.backend = { ...backend, binaryPath: path.join(h.root, 'new-synthetic-cli') };
     const current = ipc('account-refresh');
     await vi.waitFor(() => expect(h.accountReads).toHaveLength(2));
-    h.accountReads[1]({ code: 0, output: JSON.stringify({ stored: true, username: 'sample@example.test' }) });
+    h.accountReads[1]({ code: 0, output: JSON.stringify({ stored: true, username: 'sample@example.test', player: h.accountPlayer ? { username: h.accountPlayer } : null }) });
     await current;
     h.accountReads[0]({ code: 0, output: JSON.stringify({ stored: false }) });
     await Promise.all([old, repeated]);
@@ -460,6 +545,45 @@ it('routes a direct Durable through real managed-content admission and completio
   }finally{releaseCleanup();cleanup.mockRestore();globalThis.fetch=fetcher;h.contentSupported=false;h.downloads.splice(0);h.notifications.splice(0);}
 });
 
+it('passes installed DLC into the real launch environment when public discovery fails after installation', async () => {
+  const task = snapshot().downloads.find((task: any) => task.kind === 'content' && task.productId === '9MMMMMMMMMMM');
+  expect(task.status).toBe('complete');
+  const manifest = path.join(h.root, 'installed-game/MicrosoftGame.config');
+  const original = await fs.readFile(manifest, 'utf8');
+  expect(original).not.toContain('9MMMMMMMMMMM');
+  const discovery = vi.spyOn(ContentCatalog.prototype, 'discover');
+  const old = process.env.NEXUS_RELATED_PRODUCT_IDS;
+  process.env.NEXUS_RELATED_PRODUCT_IDS = '9FFFFFFFFFFF';
+  h.discoverySupported = true;
+  try {
+    for (const error of [Error('catalog 503 private.invalid/signed?secret'), new DOMException('optional discovery deadline', 'TimeoutError')]) {
+      discovery.mockRejectedValueOnce(error);
+      await ipc('launch-game', 'sample');
+      expect(snapshot().gameOperation.status).toBe('running');
+      const environment = h.launchEnvironments.at(-1)!;
+      expect(environment.NEXUS_RELATED_PRODUCT_IDS).toBe('9MMMMMMMMMMM');
+      expect(environment.XODUS_CONTENT_ROOTS).toContain('Z:' + task.destination.replaceAll('/', '\\'));
+      expect(snapshot().gameOperation.log.join('\n')).not.toContain('secret');
+      h.game!.finish();
+      await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(discovery).toHaveBeenCalledTimes(2);
+    expect(await fs.readFile(manifest, 'utf8')).toBe(original);
+    expect((await fs.readdir(task.destination))).toContain('.nexus-content-complete.json');
+  } finally {
+    if (snapshot().gameOperation.status === 'running') {
+      h.game!.finish();
+      await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    discovery.mockRestore(); h.discoverySupported = false;
+    h.blockDisplay.mockClear(); h.releaseDisplay.mockClear();
+    if (old === undefined) delete process.env.NEXUS_RELATED_PRODUCT_IDS;
+    else process.env.NEXUS_RELATED_PRODUCT_IDS = old;
+  }
+});
+
 it('gates runtime DLC hints, clears inherited foreign hints and still launches after optional discovery fails without reading accounts',async()=>{
   const old=process.env.NEXUS_RELATED_PRODUCT_IDS;
   process.env.NEXUS_RELATED_PRODUCT_IDS='9FFFFFFFFFFF';
@@ -518,6 +642,97 @@ it('saves and launches locale overrides without catalog or exhaustive manifest l
     if (oldWine === undefined) delete process.env.WINEUSERLOCALE; else process.env.WINEUSERLOCALE = oldWine;
     h.blockDisplay.mockClear(); h.releaseDisplay.mockClear();
   }
+});
+
+it('allows a per-game runtime family setting change during an unrelated download without touching the prefix or saves', async () => {
+  await setDefaultRuntime();
+  const gamePath = path.join(h.root, 'installed-game');
+  const prefixPath = path.join(h.root, 'compatdata', 'sample');
+  await fs.mkdir(prefixPath, { recursive: true });
+  await fs.writeFile(path.join(prefixPath, 'save.dat'), 'synthetic existing save bytes');
+  const configBefore = await fs.readFile(path.join(gamePath, 'MicrosoftGame.config'));
+  const downloadsBefore = h.downloads.length;
+  const id = await install('A');
+  await vi.waitFor(() => expect(h.downloads.length).toBe(downloadsBefore + 1));
+  const before = snapshot().games.find((entry:any) => entry.id === 'sample');
+  const updated = await ipc('update-game', 'sample', { runtime:family });
+  expect(updated.runtime).toBe(family);
+  expect(updated.path).toBe(gamePath);
+  expect(updated.runtimePrefixIdentity).toEqual({ layout:'game' });
+  expect(await fs.readFile(path.join(gamePath, 'MicrosoftGame.config'))).toEqual(configBefore);
+  expect(await fs.readFile(path.join(prefixPath, 'save.dat'), 'utf8')).toBe('synthetic existing save bytes');
+  expect(snapshot().downloads.find((entry:any) => entry.id === id)?.status).toBe('running');
+  h.downloads.at(-1)!.progress(false, 'complete');
+  h.downloads.at(-1)!.finish(0);
+  await vi.waitFor(() => { const task=snapshot().downloads.find((entry:any) => entry.id === id); expect(task?.status, task?.error).toBe('complete'); });
+  expect(snapshot().games.find((entry:any) => entry.id === 'sample')!.runtime).toBe(family);
+  expect(before.runtime).toBe('default');
+  await setDefaultRuntime();
+  h.downloads.splice(downloadsBefore);
+  h.notifications.splice(0);
+});
+
+it('allows a per-game runtime family setting change while a target game update is active', async () => {
+  const gamePath = path.join(h.root, 'installed-game');
+  const prefixPath = path.join(h.root, 'compatdata', 'sample');
+  const configBefore = await fs.readFile(path.join(gamePath, 'MicrosoftGame.config'));
+  const saveBefore = await fs.readFile(path.join(prefixPath, 'save.dat'), 'utf8');
+  const downloadsBefore = h.downloads.length;
+  const updateId = await ipc('update-installed-game', 'sample');
+  await vi.waitFor(() => expect(h.downloads.length).toBe(downloadsBefore + 1));
+  expect(snapshot().downloads.find((entry:any) => entry.id === updateId)?.status).toBe('running');
+  const updated = await ipc('update-game', 'sample', { runtime:family });
+  expect(updated.runtime).toBe(family);
+  expect(updated.path).toBe(gamePath);
+  expect(snapshot().downloads.find((entry:any) => entry.id === updateId)?.status).toBe('running');
+  expect(await fs.readFile(path.join(gamePath, 'MicrosoftGame.config'))).toEqual(configBefore);
+  expect(await fs.readFile(path.join(prefixPath, 'save.dat'), 'utf8')).toBe(saveBefore);
+  h.downloads.at(-1)!.finish(130);
+  await vi.waitFor(() => expect(snapshot().downloads.find((entry:any) => entry.id === updateId)?.status).toBe('cancelled'));
+  await setDefaultRuntime();
+  h.downloads.splice(downloadsBefore);
+  h.notifications.splice(0);
+});
+
+it('still rejects a runtime family setting change while the target game is running', async () => {
+  await setDefaultRuntime();
+  await ipc('launch-game', 'sample');
+  await vi.waitFor(() => expect(snapshot().gameOperation?.status).toBe('running'));
+  await expect(ipc('update-game', 'sample', { runtime:family })).rejects.toThrow('Close this game before changing its runtime');
+  expect(snapshot().games.find((entry:any) => entry.id === 'sample')!.runtime).toBe('default');
+  h.game!.finish();
+  await vi.waitFor(() => expect(snapshot().gameOperation?.status).toBe('complete'));
+});
+
+it('keeps actual managed runtime installation blocked while a download is active', async () => {
+  await setDefaultRuntime();
+  const downloadsBefore = h.downloads.length;
+  const id = await install('B');
+  await vi.waitFor(() => expect(h.downloads.length).toBe(downloadsBefore + 1));
+  await expect(Promise.resolve().then(() => ipc('runtime-family-install', family, familyBuild, { allowCachyos:true, allowPrerelease:false }))).rejects.toThrow();
+  expect(snapshot().runtime.updating).toBe(false);
+  h.downloads.at(-1)!.progress(false, 'complete');
+  h.downloads.at(-1)!.finish(0);
+  await vi.waitFor(() => expect(snapshot().downloads.find((entry:any) => entry.id === id)?.status).toBe('complete'));
+  h.downloads.splice(downloadsBefore);
+  h.notifications.splice(0);
+});
+
+it('launches with the player identity cache while keeping Store licensing bound to the Store account', async () => {
+ const prior=h.backend.capabilities.playerAccount;h.backend.capabilities.playerAccount=true;
+ try {
+  for(const player of ['personal-one@example.test','personal-two@example.test']) {
+   h.accountPlayer=player;await ipc('account-refresh');
+   expect(snapshot().auth.player).toBe(player);
+   await ipc('launch-game','sample');
+   expect(h.launchEnvironments.at(-1)!.XODUS_ACCOUNT_HASH).toBe(accountCacheKey(player));
+   expect(h.launchEnvironments.at(-1)!.XODUS_ACCOUNT_HASH).not.toBe(accountCacheKey('sample@example.test'));
+   expect((await fs.readFile(path.join(path.dirname(snapshot().settings.runtimeRoot),'offline-owner'),'utf8')).trim()).toBe(accountCacheKey('sample@example.test'));
+   h.game!.finish(0);await vi.waitFor(()=>expect(snapshot().gameOperation.status).toBe('complete'));
+  }
+ } finally {
+  h.accountPlayer=undefined;h.backend.capabilities.playerAccount=prior;await ipc('account-refresh');
+ }
 });
 
 it('launches offline only with both compatible components and discards inherited identity modes', async () => {
@@ -639,7 +854,160 @@ it('keeps interrupted updates blocked after cancellation and queue removal, then
   h.downloads.splice(0); h.notifications.splice(notifications);
 });
 
+it('changes only the tray preference without restarting account/backend work',async()=>{
+ const accounts=h.accountRequests,backend=h.backendRefreshes;
+ await h.handlers.get('update-settings')!({}, {closeToTray:true});
+ expect(snapshot().settings.closeToTray).toBe(true);expect(h.trayCreated).toHaveBeenCalledOnce();
+ await h.handlers.get('update-settings')!({}, {closeToTray:false});
+ expect(snapshot().settings.closeToTray).toBe(false);expect(h.trayDestroyed).toHaveBeenCalledOnce();
+ expect(h.accountRequests).toBe(accounts);expect(h.backendRefreshes).toBe(backend);
+ await expect(h.handlers.get('update-settings')!({}, {closeToTray:'true'})).rejects.toThrow('close-to-tray');
+});
+
+it('cancels background update checks before play, install and removal, and supports an explicit stop (#480)', async () => {
+  const begin = async () => {
+    const count = h.updateSignals.length;
+    const job = ipc('check-game-updates');
+    await vi.waitFor(() => expect(h.updateSignals.length).toBe(count + 1));
+    return { job, signal: h.updateSignals.at(-1)! };
+  };
+  const prior = {checking: false, available: true, latestVersion: '2.0.0.0', checkedAt: new Date().toISOString()};
+  h.updateReplies.push(prior); await ipc('check-game-updates', 'sample');
+  let check = await begin();
+  await ipc('stop-game-update-check'); await check.job;
+  expect(check.signal.aborted).toBe(true);
+  expect(snapshot().gameUpdates.sample).toEqual(prior);
+  expect(Object.values(snapshot().gameUpdates).some((entry: any) => entry.checking)).toBe(false);
+  check = await begin();
+  await ipc('launch-game', 'sample'); await check.job;
+  expect(check.signal.aborted).toBe(true); expect(snapshot().gameOperation.status).toBe('running');
+  h.game!.finish(); await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  check = await begin();
+  const id = await install('V'); await check.job;
+  expect(check.signal.aborted).toBe(true);
+  await vi.waitFor(() => expect(h.downloads.length).toBeGreaterThan(0));
+  await ipc('cancel-download', id, 'keep'); await h.installQueue!.settled(id);
+  await ipc('remove-download', id); h.downloads.splice(0);
+  const directory = path.join(h.root, 'remove-during-update-check');
+  await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'Game.exe'), 'MZ fixture');
+  await fs.copyFile(path.join(h.root, 'installed-game', 'MicrosoftGame.config'), path.join(directory, 'MicrosoftGame.config'));
+  const game = await ipc('import-game', directory);
+  check = await begin(); await ipc('remove-game', game.id, 'library'); await check.job;
+  expect(check.signal.aborted).toBe(true); expect(snapshot().games.some((row: any) => row.id === game.id)).toBe(false);
+  expect(h.updateStops).toHaveBeenCalledTimes(5);
+  h.blockDisplay.mockClear(); h.releaseDisplay.mockClear();
+});
+
+it('queues an installed-game update behind another download and keeps duplicate destinations protected (#480)', async () => {
+  const first = await install('U');
+  await vi.waitFor(() => expect(h.downloads).toHaveLength(1));
+  const update = await ipc('update-installed-game', 'sample');
+  expect(snapshot().downloads.find((row: any) => row.id === update)).toMatchObject({kind: 'update', status: 'queued'});
+  expect(h.downloads).toHaveLength(1);
+  await expect(ipc('update-installed-game', 'sample')).rejects.toThrow('already in');
+  await expect(ipc('launch-game', 'sample')).rejects.toThrow('Finish or cancel');
+  await ipc('cancel-download', update, 'keep'); await h.installQueue!.settled(update);
+  await ipc('cancel-download', first, 'keep'); await h.installQueue!.settled(first);
+  await ipc('remove-download', update); await ipc('remove-download', first); h.downloads.splice(0);
+});
+
+async function steamRequest(gameId?: string) {
+  const finished = vi.fn();
+  const environment = { SteamGameId:'16968485195965530112', SteamAppId:'3950780123', SDL_GAMECONTROLLERCONFIG:'Steam Controller gamepad mapping' };
+  const offer = offerSteamHandoff(environment, finished);
+  await vi.waitFor(async () => expect((await fs.stat(offer.handoff.lease.socket)).mode & 0o777).toBe(0o600));
+  h.events.get('second-instance')!(undefined, [], '', { nexusShortcut:{ schema:1, request:{ gameId } }, nexusSteam:offer.handoff });
+  return { ...offer, finished, environment };
+}
+
+it('hands Steam context to the real launch IPC path and retains the secondary through game finalization', async () => {
+  let finishCleanup!: () => void;
+  h.cleanupGate = new Promise<void>(resolve => { finishCleanup = resolve; });
+  const original = { ...process.env };
+  const offer = await steamRequest('sample');
+  try {
+    await vi.waitFor(() => expect(snapshot().gameOperation?.status).toBe('running'));
+    expect(h.launchEnvironments.at(-1)).toMatchObject(offer.environment);
+    expect(process.env).toEqual(original);
+    expect(offer.finished).not.toHaveBeenCalled();
+    h.game!.finish();
+    await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+    expect(offer.finished).not.toHaveBeenCalled();
+    finishCleanup();
+    await vi.waitFor(() => expect(offer.finished).toHaveBeenCalledTimes(1));
+  } finally { finishCleanup(); h.cleanupGate = undefined; offer.close(); }
+});
+
+it('supports Steam opening an existing launcher, Steam Stop and subsequent ordinary desktop launches', async () => {
+  const offer = await steamRequest();
+  try {
+    await vi.waitFor(() => expect(offer.finished).not.toHaveBeenCalled());
+    // Wait for authenticated handoff/showLauncher to install its context.
+    await new Promise(resolve => setTimeout(resolve, 80));
+    await ipc('launch-game', 'sample');
+    expect(h.launchEnvironments.at(-1)).toMatchObject(offer.environment);
+    const stops = h.stops;
+    const duplicate = await steamRequest();
+    try {
+      await vi.waitFor(() => expect(duplicate.finished).toHaveBeenCalledTimes(1));
+      expect(offer.finished).not.toHaveBeenCalled(); expect(h.stops).toBe(stops);
+    } finally { duplicate.close(); }
+    offer.close();
+    await vi.waitFor(() => expect(h.stops).toBe(stops + 1));
+    await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await ipc('launch-game', 'sample');
+    expect(h.launchEnvironments.at(-1)?.SteamGameId).toBe('');
+    expect(h.launchEnvironments.at(-1)?.SDL_GAMECONTROLLERCONFIG).toBe(process.env.SDL_GAMECONTROLLERCONFIG);
+    h.game!.finish();
+    await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+  } finally { offer.close(); }
+});
+
+it('does not start a game if Steam closes its request during launch preparation', async () => {
+  let ready!: () => void;
+  h.wrapperGate = new Promise<void>(resolve => { ready = resolve; });
+  const count = h.launchEnvironments.length, errors = h.errors.length;
+  const offer = await steamRequest('sample');
+  try {
+    await vi.waitFor(() => expect(snapshot().gameOperation?.status).toBe('preparing'));
+    offer.close(); await new Promise(resolve => setTimeout(resolve, 30)); ready();
+    await vi.waitFor(() => expect(h.errors.length).toBe(errors + 1));
+    expect(h.launchEnvironments).toHaveLength(count);
+    expect(snapshot().gameOperation).toBeUndefined();
+  } finally { ready(); h.wrapperGate = undefined; offer.close(); }
+});
+
+it('keeps cloud failure visible after exit0, outside the bounded log, without forcing upload (#297)', async () => {
+  h.cloudSupported = true;
+  const notices = h.notifications.length;
+  try {
+    await ipc('launch-game', 'sample');
+    expect(h.launchEnvironments.at(-1)?.XODUS_SAVE_SYNC).toBe('auto');
+    h.game!.line('0294:err:gdkc:initialize_provider cloud sync failed, hr 0x8083000a.');
+    h.game!.line('0294:err:gdkc:cloud_disable cloud saves disabled for this session, continuing with local saves only.');
+    h.game!.line('xodus-savesync: cloud 0 downloaded 0 uploaded 0');
+    for (let i = 0; i < 300; i++) h.game!.line(`Game line ${i}`);
+    expect(snapshot().gameOperation.cloudSaveWarning).toContain('conflict');
+    expect(h.notifications.slice(notices)).toHaveLength(1);
+    expect(h.notifications.at(-1)?.title).toBe('Cloud saves need attention');
+    h.game!.finish();
+    await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+    expect(snapshot().gameOperation.cloudSaveWarning).toContain('conflict');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await ipc('launch-game', 'sample');
+    h.game!.line('xodus-savesync: cloud 1 downloaded 1 uploaded 0');
+    expect(snapshot().gameOperation.cloudSaveWarning).toBeUndefined();
+    h.game!.finish();
+    await vi.waitFor(() => expect(snapshot().gameOperation.status).toBe('complete'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+  } finally { h.cloudSupported = false; h.notifications.splice(notices); }
+});
+
 it('runs real queue IPC, pause/cancel/failure/restart and simultaneous play/download safely', async () => {
+  h.blockDisplay.mockClear(); h.releaseDisplay.mockClear();
   const first = await install('A'); await vi.waitFor(() => expect(h.downloads).toHaveLength(1));
   expect(h.blockDisplay).not.toHaveBeenCalled();
   await ipc('launch-game', 'sample'); expect(snapshot().gameOperation.status).toBe('running');
@@ -651,7 +1019,7 @@ it('runs real queue IPC, pause/cancel/failure/restart and simultaneous play/down
   expect(h.downloads).toHaveLength(1); expect(snapshot().downloads.find((task: any) => task.id === next).status).toBe('queued');
   await expect(install('C')).rejects.toThrow('already in');
   await expect(install('D', path.join(h.root, 'installed-game', 'nested'))).rejects.toThrow('overlaps');
-  await expect(ipc('update-installed-game', 'sample')).rejects.toThrow('Another Xodus');
+  await expect(ipc('update-installed-game', 'sample')).rejects.toThrow('Close this game');
   await expect(ipc('update-settings', { market: 'GB' })).rejects.toThrow('Another Xodus');
   await ipc('cancel-download', cancel); h.downloads[0].finish(1);
   await vi.waitFor(() => expect(h.downloads).toHaveLength(2));

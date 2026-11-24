@@ -17,20 +17,25 @@ it('offers an app-owned overlay shortcut and left/right shelf settings with left
   expect(html).toMatch(/<details class="settings-card settings-guide" aria-label="Nexus Overlay">/);
   expect(html).not.toContain('Desktop portal');
 });
-it('keeps backend health and launcher update notices distinct', () => {
+it('shows one update action without a permanent ready badge or duplicate settings control', () => {
   const data = demoSnapshot(); data.launcherUpdate!.latestVersion = '0.3.1';
   const html = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
-  expect(html).toContain('Update available'); expect(html).toContain('Xodus ready');
+  expect(html).toContain('Update available'); expect(html).toContain('Launcher 0.3.1');
+  expect(html).not.toContain('Xodus ready'); expect(html).not.toContain('status-dot');
+  expect(html.match(/<button/g) ?? []).toHaveLength(1);
 });
-it('shows the offline verdict only while the backend itself is available', () => {
+it('leaves the decluttered header empty while the backend is reachable, offline or unavailable', () => {
   const data = demoSnapshot(); data.connectivity = { state: 'offline', reason: 'No network interface is connected.' };
-  const offline = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
-  expect(offline).toContain('status-dot amber'); expect(offline).toContain('>Offline<'); expect(offline).toContain('stored offline licenses');
+  expect(renderToStaticMarkup(<TopStatus data={data} go={() => {}} />)).toBe('');
   data.backend.available = false;
-  const noBackend = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
-  expect(noBackend).toContain('status-dot red'); expect(noBackend).toContain('Backend offline'); expect(noBackend).not.toContain('>Offline<');
+  expect(renderToStaticMarkup(<TopStatus data={data} go={() => {}} />)).toBe('');
   data.backend.available = true; data.connectivity = { state: 'unknown' };
-  expect(renderToStaticMarkup(<TopStatus data={data} go={() => {}} />)).toContain('Xodus ready');
+  expect(renderToStaticMarkup(<TopStatus data={data} go={() => {}} />)).toBe('');
+});
+const managedRuntimeUpdate = (id: 'nexus' | 'nexus-cachyos') => ({
+  id, checking: false, installing: false, version: 'runtime-10.0', channel: 'stable' as const, updateAvailable: true,
+  installed: { id, label: id === 'nexus' ? 'Standard' : 'CachyOS', buildId: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), manifestSha256: 'c'.repeat(64) },
+  available: { version: id === 'nexus' ? 'runtime-11.0-new' : 'runtime-cachyos-11.0-new', candidateSha256: 'd'.repeat(64), sourceCommit: 'e'.repeat(40), archiveName: 'runtime.tar.xz', requiresBackendVersion: '0.2.3', requiresLauncherVersion: '0.5.0' },
 });
 it.each([
   [false, false, false], [true, false, false], [false, true, false], [false, false, true],
@@ -39,15 +44,23 @@ it.each([
   const data = demoSnapshot();
   if (launcher) data.launcherUpdate!.latestVersion = '0.3.9';
   data.backend.releaseAvailable = true; data.backend.updateAvailable = backend; data.backend.releaseVersion = '0.2.9';
-  data.runtime.nexusAvailable = true; data.runtime.nexusVersion = 'runtime-11.0-new';
-  data.runtime.nexusName = 'xodus-nexus-runtime-11.0-new-x86_64.tar.xz';
-  data.runtime.name = runtime ? 'xodus-nexus-runtime-11.0-old' : 'xodus-nexus-runtime-11.0-new';
+  data.runtime.managedFamilies = runtime ? [managedRuntimeUpdate('nexus')] : [];
   const html = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
   expect(html.match(/class="update-notice"/g) ?? []).toHaveLength(launcher || backend || runtime ? 1 : 0);
-  for (const [available, label] of [[launcher, 'Launcher 0.3.9'], [backend, 'Backend 0.2.9'], [runtime, 'Runtime 11.0-new']] as const) {
+  for (const [available, label] of [[launcher, 'Launcher 0.3.9'], [backend, 'Backend 0.2.9'], [runtime, 'Standard 11.0-new']] as const) {
     if (available) expect(html).toContain(label); else expect(html).not.toContain(label);
   }
-  expect(html).toContain('Xodus ready');
+});
+it('advertises only managed family updates and never the legacy global pointer', () => {
+  const data = demoSnapshot();
+  data.runtime = { ...data.runtime, installed: true,
+    name: 'nexus-runtime-cachyos-11.0-experimental-ge36f73cb-local',
+    nexusAvailable: true, nexusVersion: 'runtime-11.0-new', nexusName: 'nexus-runtime-11.0-new-x86_64.tar.xz' };
+  expect(renderToStaticMarkup(<TopStatus data={data} go={() => {}} />)).not.toContain('update-notice');
+  data.runtime.managedFamilies = [managedRuntimeUpdate('nexus-cachyos')];
+  const cachy = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
+  expect(cachy).toContain('update-notice');
+  expect(cachy).toContain('CachyOS 11.0-new');
 });
 it('does not advertise failed, incomplete or already installed component releases', () => {
   const data = demoSnapshot();
@@ -61,10 +74,10 @@ it('does not advertise failed, incomplete or already installed component release
 it('preserves the launcher restart notice while listing pending backend and runtime updates', () => {
   const data = demoSnapshot(); data.launcherUpdate!.restartRequired = true;
   data.backend.updateAvailable = true; data.backend.releaseAvailable = true; data.backend.releaseVersion = '0.2.9';
-  data.runtime.nexusAvailable = true; data.runtime.nexusName = 'xodus-nexus-runtime-next-x86_64.tar.xz';
+  data.runtime.managedFamilies = [managedRuntimeUpdate('nexus')];
   const html = renderToStaticMarkup(<TopStatus data={data} go={() => {}} />);
   expect(html).toContain('Restart available'); expect(html).toContain('Restart to finish launcher update.');
-  expect(html).toContain('Backend 0.2.9'); expect(html).toContain('Runtime'); expect(html).not.toContain('undefined');
+  expect(html).toContain('Backend 0.2.9'); expect(html).toContain('Standard 11.0-new'); expect(html).not.toContain('undefined');
 });
 it('offers verified in-app install with independent backend version labels', () => {
   const data = demoSnapshot(); data.launcherUpdate = { currentVersion: '9.0.0', checking: false, latestVersion: '9.0.1', canInstall: true }; data.backend.version = '0.2.1';
@@ -95,4 +108,19 @@ it('offers Resume and Cancel for paused downloads, without treating them as fini
   expect(html).toContain('Resume download'); expect(html).toContain('Cancel download');
   expect(html).not.toContain('Clear finished'); expect(html).not.toContain('Remove from queue');
   expect(html).not.toContain('util-linux');
+});
+it('keeps accessible names on all six icon-only download actions', () => {
+  const data = demoSnapshot();
+  data.downloads = [
+    { id:'paused', title:'Paused game', destination:'/tmp/demo', productId:'TEST', status:'paused',
+      canPause:true, progress:25, phase:'Paused', log:[], startedAt:'today' },
+    { id:'running', title:'Running game', destination:'/tmp/running', productId:'TEST3', status:'running',
+      canPause:true, progress:50, phase:'Downloading', log:[], startedAt:'today' },
+    { id:'failed', title:'Failed game', destination:'/tmp/failed', productId:'TEST2', status:'failed',
+      canPause:false, progress:0, phase:'Failed', log:[], startedAt:'today' },
+  ];
+  const html = renderToStaticMarkup(<DownloadsPage data={data} toast={() => {}} />);
+  for (const label of ['Resume download', 'Pause download', 'Cancel download', 'Retry installation', 'Show log', 'Open folder', 'Remove from queue']) {
+    expect(html).toMatch(new RegExp(`<button[^>]*aria-label="${label}"[^>]*data-tooltip="${label}"`));
+  }
 });

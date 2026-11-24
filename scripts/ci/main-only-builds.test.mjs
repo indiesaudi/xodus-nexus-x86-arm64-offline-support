@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 const yaml=createRequire(import.meta.url)('js-yaml');
 const read=async name=>yaml.load(await fs.readFile(`.github/workflows/${name}.yml`,'utf8'));
-const candidateGuard="github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[source-only]')";
+const candidateGuard="steps.source_mode.outputs.mode == 'full'";
+const sourceGuard="steps.source_mode.outputs.mode == 'source-only'";
 test('manual launcher candidates can select x64 without weakening main-only checks', async()=>{
   const workflow=await read('ci');
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.architecture.options,['both','x64']);
@@ -17,49 +18,43 @@ test('manual launcher candidates can select x64 without weakening main-only chec
   assert.ok(workflow.jobs.checks.steps.some(step=>step.run==='npm run build'&&step.if===candidateGuard));
   assert.ok(workflow.jobs.checks.steps.some(step=>step.run==='node scripts/ci/artifact-manifest.mjs write launcher release'&&step.if===candidateGuard));
 });
-test('full backend/runtime workflows only build main, including manual dispatch',async()=>{
-  for(const [name,job] of [['backend','build'],['runtime','changes']]){
-    const workflow=await read(name);
-    if(name==='backend')assert.deepEqual(workflow.on.push.branches,['main']);
-    else assert.deepEqual(Object.keys(workflow.on),['workflow_dispatch']);
-    assert.equal(workflow.on.pull_request,undefined);
-    assert.equal(workflow.jobs[job].if,name==='backend'?candidateGuard:"github.ref == 'refs/heads/main'");
-  }
+test('the launcher repository has no separate runtime workflow to dispatch',async()=>{
+  // Runtime builds live in the independent runtime repository; only launcher
+  // candidates are promoted from this repository.
+  await assert.rejects(fs.readFile('.github/workflows/runtime.yml','utf8'),{code:'ENOENT'});
+  const release=await read('release');
+  assert.deepEqual(Object.keys(release.on),['workflow_dispatch']);
+  assert.equal(release.jobs.promote.if,"github.ref == 'refs/heads/main' && inputs.approve_release");
 });
 test('develop/PR checks cannot package or upload launcher candidates',async()=>{
   const steps=(await read('ci')).jobs.checks.steps;
   const checks=steps.find(step=>step.name==='Check source without compiling a distribution candidate');
-  assert.equal(checks.if,"github.ref != 'refs/heads/main' || contains(github.event.head_commit.message, '[source-only]')");
+  assert.equal(checks.if,sourceGuard);
   assert.equal(checks.run,'npm run i18n:check && npm run typecheck && npm run test');
   for(const step of steps.filter(step=>step.run?.includes('npm run build')||step.run?.includes('electron-builder')||step.run?.includes('artifact-manifest.mjs')||step.uses?.startsWith('actions/upload-artifact'))){
     assert.equal(step.if,candidateGuard);
   }
 });
-test('source-only main integrations run checks but never package or compile candidates', async()=>{
-  const ci=await read('ci'),backend=await read('backend');
+test('ordinary main/develop/PR events run source checks but never compile or package candidates', async()=>{
+  const ci=await read('ci');
   const checks=ci.jobs.checks.steps.find(step=>step.name==='Check source without compiling a distribution candidate');
-  const candidates=[backend.jobs.build,...ci.jobs.checks.steps.filter(step=>step.run?.includes('npm run build')||step.run?.includes('electron-builder')||step.run?.includes('artifact-manifest.mjs')||step.uses?.startsWith('actions/upload-artifact'))];
-  const evaluate=(expression,ref,message)=>Function('github','contains',`return (${expression})`)({ref,event:{head_commit:{message}}},(value,part)=>String(value??'').includes(part));
-  for(const ref of ['refs/heads/main','refs/heads/develop','refs/pull/1/merge'])for(const message of ['ordinary integration','[source-only] Integrate verified source']){
-    const expected=ref==='refs/heads/main'&&!message.includes('[source-only]');
-    for(const candidate of candidates)assert.equal(evaluate(candidate.if,ref,message),expected);
-    assert.equal(evaluate(checks.if,ref,message),!expected);
+  const candidates=[...ci.jobs.checks.steps.filter(step=>step.run?.includes('npm run build')||step.run?.includes('electron-builder')||step.run?.includes('artifact-manifest.mjs')||step.uses?.startsWith('actions/upload-artifact'))];
+  assert.equal(checks.if,sourceGuard);
+  for(const candidate of candidates)assert.equal(candidate.if,candidateGuard);
+  const {resolveMode,FULL_MODE,SOURCE_ONLY_MODE}=await import('./source-check-plan.mjs');
+  for(const ref of ['refs/heads/main','refs/heads/develop','refs/pull/1/merge']){
+    assert.equal(resolveMode('push',ref),SOURCE_ONLY_MODE);
+    assert.equal(resolveMode('pull_request',ref),SOURCE_ONLY_MODE);
   }
+  assert.equal(resolveMode('workflow_dispatch','refs/heads/main'),FULL_MODE);
+  for(const ref of ['refs/heads/develop','refs/heads/feature/example','refs/pull/1/merge'])
+    assert.equal(resolveMode('workflow_dispatch',ref),SOURCE_ONLY_MODE);
   assert.deepEqual(Object.keys((await read('release')).on),['workflow_dispatch']);
 });
-test('the published backend uses the dedicated UI without WebKit build prerequisites',async()=>{
-  const recipe=await fs.readFile('scripts/build-backend.mjs','utf8');
-  assert.match(recipe,/const features = \['--no-default-features'\]/);
-  assert.match(recipe,/External sign-in capability missing/);
-  const native=(await read('backend')).jobs.build.steps.find(step=>step.name==='Install native build libraries').run;
-  assert.doesNotMatch(native,/webkit|libgtk|libsoup/i);
-});
-test('runtime CI exposes the installed Ubuntu Wine tools before compilation',async()=>{
-  const steps=(await read('runtime')).jobs.build.steps;
-  const install=steps.findIndex(step=>step.name==='Install build and test prerequisites');
-  const build=steps.findIndex(step=>step.name==='Build all shared components from pinned clean checkouts');
-  assert.ok(install>=0&&build>install);
-  assert.match(steps[install].run,/wine64-tools/);
-  assert.match(steps[install].run,/test -x \/usr\/lib\/wine\/widl/);
-  assert.match(steps[install].run,/echo \/usr\/lib\/wine >> "\$GITHUB_PATH"/);
+test('launcher CI compiles no native runtime fixtures',async()=>{
+  const steps=(await read('ci')).jobs.checks.steps;
+  const runs=steps.map(step=>step.run??'').join('\n');
+  assert.doesNotMatch(runs,/wine64-tools|mingw|runtime-compat|runtime-tests/);
+  assert.ok(steps.some(step=>step.run==='npm run test:runtime-tools'&&step.if===candidateGuard));
+  assert.ok(steps.some(step=>step.name==='Run noncompiling runtime tool tests'&&step.if===sourceGuard));
 });
