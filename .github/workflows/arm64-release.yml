@@ -1,0 +1,142 @@
+name: arm64 release
+
+# Builds the arm64 AppImage of each upstream Nexus Launcher release and
+# publishes it here under the same tag. The source is upstream's tagged
+# commit; the only change is .github/arm64/point-updater-at-fork.mjs, which
+# makes arm64 installs look for updates in this repository.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream release tag to build, such as v0.5.1 (empty: the latest upstream release)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: domsvoboda/nexus-launcher
+
+jobs:
+  plan:
+    # Upstream's own workflows run on this fork too; this one only belongs here.
+    if: github.repository == 'indiesaudi/xodus-nexus-x86-arm64-offline-support'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$(gh release view --repo "$UPSTREAM" --json tagName --jq .tagName)}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$tag is not a stable vX.Y.Z release tag"; exit 1
+          fi
+          gh release view "$tag" --repo "$UPSTREAM" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then error("not a stable upstream release") else empty end'
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already published here; nothing to build."
+            exit 0
+          fi
+          sha="$(gh api "repos/$UPSTREAM/commits/$tag" --jq .sha)"
+          echo "Building upstream $tag ($sha)."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.tag != ''
+    runs-on: ubuntu-24.04-arm
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+          sparse-checkout: .github/arm64
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.plan.outputs.sha }}
+          path: src
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+      - name: Install dependencies
+        working-directory: src
+        run: npm ci
+      - name: Point the updater at this repository
+        run: node fork/.github/arm64/point-updater-at-fork.mjs src "$GITHUB_REPOSITORY"
+      - name: Check and build (upstream's checks and tests)
+        working-directory: src
+        run: npm run build
+      - name: Package the arm64 AppImage
+        working-directory: src
+        run: npx --no-install electron-builder --linux AppImage --arm64 --publish never
+      - name: Verify the AppImage and write its checksum
+        working-directory: src/release
+        run: |
+          set -euo pipefail
+          name="Nexus-Launcher-${TAG#v}-arm64.AppImage"
+          test -f "$name" || { echo "::error::$name was not produced"; ls -la; exit 1; }
+          file -L "$name" | grep -q 'ARM aarch64' || { echo "::error::$name is not an aarch64 executable"; exit 1; }
+          sha512sum "$name" > "$name.sha512sum"
+          cat "$name.sha512sum"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-appimage
+          path: |
+            src/release/*-arm64.AppImage
+            src/release/*-arm64.AppImage.sha512sum
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: arm64-appimage
+          path: out
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Unofficial **arm64** build of upstream Nexus Launcher [$TAG](https://github.com/$UPSTREAM/releases/tag/$TAG), built from upstream commit [\`${SHA:0:12}\`](https://github.com/$UPSTREAM/commit/$SHA).
+
+          The source is unchanged except for one thing: the in-app updater checks this repository, so arm64 installs are offered the next arm64 build. See [what changed in $TAG](https://github.com/$UPSTREAM/releases/tag/$TAG).
+
+          The launcher downloads its backend and game runtime from upstream, as the x86_64 build does. Arm64 support is experimental upstream.
+
+          **Install:** download \`Nexus-Launcher-${TAG#v}-arm64.AppImage\`, make it executable (\`chmod +x\`) and open it.
+          EOF
+          # Tag upstream's commit. If GitHub refuses (this fork does not contain it yet),
+          # tag this fork's commit instead; the notes name the source commit either way.
+          publish() {
+            gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$1" \
+              --title "Nexus Launcher $TAG for arm64" --notes-file notes.md
+          }
+          publish "$SHA" || publish "$GITHUB_SHA"

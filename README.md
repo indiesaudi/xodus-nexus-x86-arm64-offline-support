@@ -2,218 +2,64 @@
 
 <img src="assets/icon.png" width="96" alt="Nexus Launcher" />
 
-# Nexus Launcher
+# Nexus Launcher for arm64
 
-Your Microsoft Store PC games, on Linux.
-
-[![CI](https://github.com/domsvoboda/nexus-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/domsvoboda/nexus-launcher/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/uu8ZfxFhm4)
-
-**[🌐 Help translate Nexus Launcher on Tolgee](https://app.tolgee.io/projects/36162)**
+arm64 builds of [Nexus Launcher](https://github.com/domsvoboda/nexus-launcher), for Linux handhelds and
+other arm64 devices, such as the ones armadaOS supports.
 
 </div>
 
-> [!IMPORTANT]
-> **This fork's `main` now tracks upstream Xodus Nexus `develop` unchanged.**
-> Offline play (#373), native arm64 launcher and backend builds (#374), per-game FEX settings (#420)
-> and the arm64 runtime loader (#421) are merged upstream. Features that are not merged upstream
-> moved off `main`:
->
-> - **Background service** (Steam's **Exit game** closes games gracefully): proposed upstream as three PRs,
->   [#448](https://github.com/domsvoboda/xodus-nexus/pull/448) (launch preparation in `GameSession`),
->   [#449](https://github.com/domsvoboda/xodus-nexus/pull/449) (close games like a user) and
->   [#450](https://github.com/domsvoboda/xodus-nexus/pull/450) (optional background service), on the
->   `split/daemon-a-refactor`, `split/daemon-b-close` and `split/daemon-c-service` branches.
-> - **Any Proton per game** and the **Xodus Nexus** Steam compatibility tool: branch
->   [`feature/steam-any-proton`](https://github.com/indiesaudi/xodus-nexus-x86-arm64-offline-support/tree/feature/steam-any-proton).
->   Its upstream PR [#381](https://github.com/domsvoboda/xodus-nexus/pull/381) was closed; the review
->   lists what it needs before it can be proposed again.
-> - **Fork release 0.4.1** with all of the above combined: branch
->   [`archive/main-0.4.1`](https://github.com/indiesaudi/xodus-nexus-x86-arm64-offline-support/tree/archive/main-0.4.1).
->
-> Builds from `main` install and update from the upstream releases linked below. See the
-> [changelog](CHANGELOG.md) for the full list of removed features.
-
 > [!CAUTION]
-> **Nexus Launcher is an independent, unofficial project built on Xodus. It is not an official project or release from the upstream Xodus developers.**
->
-> Please report all issues encountered with **Nexus Launcher** only in the [Nexus Launcher repository](https://github.com/domsvoboda/nexus-launcher/issues), not in the upstream Xodus issue tracker or support channels.
->
-> Nexus Launcher includes its own changes, so a problem in Nexus Launcher does not necessarily indicate a problem in upstream Xodus.
+> **These are unofficial builds.** Upstream Nexus Launcher publishes only x86_64 AppImages; this repository
+> builds its released code for arm64. It is not affiliated with the Nexus Launcher maintainers or the Xodus
+> developers. Report problems that only happen in these arm64 builds [here](../../issues), and everything
+> else to [Nexus Launcher](https://github.com/domsvoboda/nexus-launcher/issues).
 
-An Xbox-inspired launcher built on [Xodus](https://github.com/xodus-gaming/xodus),
-using our patched Nexus backend and Nexus Runtime.
-Browse the Store, install games you own or can access through a subscription,
-and play with a managed runtime family. Xbox sign-in and cloud saves are available
-for supported games.
-
-![Nexus Launcher demo](docs/screenshots/demo.gif?v=3db50803)
-
-## Community translations
-
-Help make Nexus Launcher available in your language. Open our
-[public Tolgee project](https://app.tolgee.io/projects/36162), sign in and suggest
-translations for the launcher interface. No coding or GitHub access is needed.
-Maintainers review suggestions before including them in a release. Missing a
-language? Request it in a [GitHub issue](https://github.com/domsvoboda/nexus-launcher/issues).
-
-[Start translating →](https://app.tolgee.io/projects/36162/translations) ·
-[Translation guide](docs/TRANSLATING.md)
+For what the launcher does, how to use it and which games work, read the
+[upstream README](https://github.com/domsvoboda/nexus-launcher#readme).
 
 ## Install
 
-Download the latest Linux AppImage from [Releases](https://github.com/domsvoboda/nexus-launcher/releases), make it executable and open it. Stable releases currently ship for x86_64. Experimental ARM64 support requires matching native launcher, backend and runtime builds, compatible graphics drivers and FEX for x86 Windows games.
+1. Download `Nexus-Launcher-<version>-arm64.AppImage` from [Releases](../../releases/latest).
+2. Make it executable: `chmod +x Nexus-Launcher-*-arm64.AppImage`
+3. Open it.
 
-The current x86_64 runtime requires glibc 2.38 or newer (for example Ubuntu 24.04 or a current SteamOS, Fedora or Arch installation). Ubuntu 22.04 does not meet this requirement.
-
-For an application-menu installation on supported distributions:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh | bash
-```
-
-On first startup, the launcher installs and verifies the **Nexus backend** in
-the background so you can sign in during setup. Install the **Nexus Runtime**
-from **Settings** before launching games. A valid purchase or subscription is required.
-
-If passkey sign-in gets stuck, choose **Continue in browser** in the sign-in
-window. This option requires Google Chrome, either a native installation or the
-Flatpak version available through Discover. Other browsers are not supported.
-
-[Setup guide and SteamOS requirements](https://github.com/domsvoboda/nexus-launcher/wiki/Getting-started)
-
-## Uninstall
-
-Close Nexus Launcher and its games, then remove the application-menu installation without sudo:
+Upstream's installer downloads only from upstream, which has no arm64 build. To add the launcher to your
+application menu (and install its system prerequisites), give the installer the AppImage you downloaded:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/domsvoboda/nexus-launcher/main/scripts/install.sh \
+  | XODUS_NEXUS_APPIMAGE="$PWD/Nexus-Launcher-<version>-arm64.AppImage" bash
 ```
 
-Games, saves, settings, downloaded runtimes, wallet credentials and system packages are kept.
-To preview the files, download the script and run `bash uninstall.sh --dry-run`.
-If you only downloaded an AppImage manually, delete that AppImage instead.
+To uninstall, follow [upstream's instructions](https://github.com/domsvoboda/nexus-launcher#uninstall).
 
-## Use
+## Updates
 
-- **My Library** combines owned, Game Pass and installed games, with Access, Play state and title filters.
-- Open a game for its description, categories, screenshot gallery and available Xbox achievements, time played and last activity. Xbox data depends on the account and game.
-- **Store** lets you browse and install supported PC games.
-- **Manage content** installs licensed add-ons and campaign packages.
-- **Install Queue** downloads games one at a time and lets you add more while downloading or playing another game. Pause and resume are supported, including manual resume after restarting the launcher.
-- Right-click an installed game for settings, VC++ prerequisites, shortcuts or removal.
-- Game settings also choose the runtime family for that game. The choice follows the latest installed verified build of the family and keeps the same prefix and saves.
-- Choose **Add to Steam** in the game menu, or **Add Nexus Launcher to Steam** in Settings, to create a Non-Steam shortcut with available artwork. Steam can stay running, including in Game Mode. Requires native Linux Steam; Flatpak Steam is not yet supported.
-- Update the launcher, backend and each installed runtime family in **Settings**.
-- **Settings → Interface language** selects a bundled translation independently of game language and Store region. Missing translations fall back to English.
-- **Settings → Downloads** sets a combined game download speed limit in MiB/s (0 means unlimited). A supporting Nexus backend is required; saving the limit also applies it to active downloads.
-- **Settings → Shader cache** sets the per-game Mesa/NVIDIA driver cache limit, 4 GiB by default. Changes apply on the next game launch; explicit environment overrides take precedence.
-- For account, library or installation errors, use **Settings → Nexus backend → Open backend diagnostic log**. The local log contains safe error codes and operation results, not credentials. Review it before sharing.
+Each upstream release gets a matching arm64 release here with the same version number, usually within a few
+hours. The launcher's in-app updater checks this repository, so it offers you the next arm64 build.
 
-## In-game overlay
+## How the builds are made
 
-Enable **Settings → Nexus Overlay** to open friends, chats and party controls
-while playing. Record a shortcut, choose the screen edge and save the settings.
-The overlay requires Python 3, PyGObject, GTK 3 and WebKitGTK 4.1. Your desktop
-may ask you to approve the shortcut on Wayland; fullscreen and monitor detection
-depend on the desktop. The overlay is optional and disabled by default.
+[`arm64-release.yml`](.github/workflows/arm64-release.yml) checks upstream for new releases. For each one,
+it checks out upstream's tagged commit, runs upstream's own checks and tests, and packages the AppImage on
+an arm64 GitHub runner. Each release links the exact upstream commit it was built from.
 
-## Offline play
+The source is upstream's, with one change:
+[`point-updater-at-fork.mjs`](.github/arm64/point-updater-at-fork.mjs) points the in-app updater at this
+repository, as described in [Updates](#updates).
 
-Use **Settings → Offline permissions** while online to designate this PC for
-offline play. Microsoft allows only one offline PC per account; changing it
-removes the designation from the previous device and is subject to the limit
-shown before confirmation. Launch each game online once afterwards. Supported
-games can then start without a connection while their Microsoft-issued lease
-remains valid. A compatible backend and runtime are required; online-only games
-still need their servers. See [Xbox offline-play guidance](https://support.xbox.com/en-GB/help/games-apps/game-setup-and-play/play-games-offline-on-windows-10-using-offline-mode).
+## What to expect on arm64
 
-## Wallet setup and unlocking
+The launcher itself is native arm64. It downloads the rest from upstream, the same way the x86_64 build
+does:
 
-- If the service is stopped, use **Start service**. Supported KDE wallets should also start automatically when Nexus Launcher opens in Game Mode.
-- If your wallet has a password, its native unlock window may appear. Enter your **wallet password**, which is not necessarily your Microsoft account password. Nexus Launcher does not receive this password.
-- A wallet without a password should unlock without requiring password entry.
-- If no wallet exists, use **Create wallet** and complete the system dialog. On KDE, choose **Classic, blowfish encrypted file** for a normal password-based wallet if you do not have a GPG encryption key. An empty password does not protect stored credentials.
-- If setup or the password dialog does not work in Game Mode, try it in Desktop Mode first. If the problem persists, include the backend diagnostic log in your issue report.
+- **Backend:** upstream publishes native aarch64 builds.
+- **Game runtime:** upstream's arm64 runtime is experimental. The Standard runtime family has arm64 releases;
+  the CachyOS family is x86_64 only.
+- **Games:** most Microsoft Store PC games are x86_64 Windows games. They run through FEX emulation and need
+  working Vulkan graphics drivers, so performance and compatibility depend on your device.
 
-## Microsoft Store device limit
+## License
 
-Microsoft Store supports up to 10 linked devices. If downloading or launching a
-game fails with **Microsoft Store device limit reached** (licensing code 501),
-open [Microsoft Store device management](https://account.microsoft.com/devices/content)
-and sign in with the same Microsoft account. Unlink only an old device you no
-longer use, then retry in Nexus Launcher. You do not need to sign out or reset the wallet.
-Other license errors can have different causes.
-
-[Documentation](https://github.com/domsvoboda/nexus-launcher/wiki) ·
-[Report an issue](https://github.com/domsvoboda/nexus-launcher/issues)
-
-## How it works
-
-| Component | Role |
-| --- | --- |
-| Nexus Launcher | The desktop interface for the Store, library, downloads, settings and launching games. |
-| [Nexus backend](https://github.com/domsvoboda/nexus-backend) | Our backend fork of [Xodus](https://github.com/xodus-gaming/xodus), handling Microsoft account sign-in, genuine license checks, package downloads and launch preparation. |
-| [Nexus Runtime](https://github.com/domsvoboda/nexus-runtime) | Our fork of Valve's Proton Experimental, assembling Wine, XGameRuntime, graphics translation and supporting libraries into one complete runtime. |
-| [Nexus Wine](https://github.com/domsvoboda/nexus-wine) | The matching Wine fork, providing Windows API compatibility and Nexus game fixes. |
-| [Nexus XGameRuntime](https://github.com/domsvoboda/nexus-xgameruntime) | Our fork of the upstream C++ XGameRuntime, providing game-facing account, cloud-save, package and Store/DLC interfaces. API coverage varies by game. |
-
-The launcher asks the backend to prepare a licensed game, then starts it with
-the selected Nexus Runtime family. Wine provides Windows compatibility; XGameRuntime
-connects supported Xbox and Microsoft Store game APIs to the Nexus backend.
-DXVK and VKD3D-Proton translate supported Direct3D graphics to Vulkan.
-
-Install and update the **Standard** and optional **CachyOS** runtime families
-independently in **Settings**. Each family bundles Wine and XGameRuntime at
-matching revisions, so there is no need to install the individual forks
-separately. Games choose an installed family in their own settings; an
-unconfigured game uses Standard. Installed families follow their latest
-verified build and reuse the existing prefix and saves. Compatibility and
-online services still depend on the game.
-
-## Compatible games
-
-These results come from manual testing and user reports. Other games may work,
-but have not been verified and may encounter compatibility issues.
-
-| Game | Playable | Status |
-| --- | --- | --- |
-| Persona 3 Reload | Yes | Gameplay, network features and cloud saves work; expansion pass not recognized. ([user report](https://github.com/domsvoboda/nexus-launcher/issues/317)) |
-| John Carpenter's Toxic Commando | Yes | Unreleased Standard runtime: connects to other players online. |
-| Forza Motorsport | Partial | Unreleased runtime: intro completed. Online play unverified. |
-| Forza Horizon 5 | Yes | Unreleased Standard runtime: playable; startup can be slow. Online play unverified. |
-| Age of Empires II: Definitive Edition | Yes | Playable. Online play unverified. |
-| Age of Empires III: Definitive Edition | Yes | Playable. Online play unverified. |
-| Age of Empires: Definitive Edition | Yes | Playable. Online play unverified. |
-| Age of Empires IV | Yes | Playable. Online play unverified. |
-| Batman: Arkham Knight | Yes | Works with Standard and CachyOS runtimes. |
-| Gears of War: E-Day | Yes | Playable online; Xbox playing status works. |
-| Deep Rock Galactic | Yes | Playable online. |
-| Minecraft Dungeons | Yes | Playable online with launcher 0.3.5; [ownership failures](https://github.com/domsvoboda/nexus-launcher/issues/80) also reported on other setups. |
-| Minecraft Dungeons II | Yes | Playable online. |
-| Minecraft for Windows | Yes | Playable online. For licensing code 501, check the [Store device limit](#microsoft-store-device-limit). |
-| Minecraft Launcher | Yes | Sign-in and Java download/startup work with launcher 0.3.5; Java online unverified. [Login failure](https://github.com/domsvoboda/nexus-launcher/issues/107) also reported on another setup. |
-
-[Full compatibility list](https://github.com/domsvoboda/nexus-launcher/wiki/Compatibility)
-
-User reports describe individual setups, not universal compatibility. The wiki
-links to report sources and the community spreadsheet. Launch-only reports do
-not confirm gameplay or online support.
-
-## Screenshots
-
-[Library](docs/screenshots/demo-library.gif) ·
-[Store](docs/screenshots/demo-store.gif) ·
-[Social](docs/screenshots/demo-social.png) ·
-[Chat](docs/screenshots/demo-chat.png) ·
-[Install queue](docs/screenshots/demo-downloads.png) ·
-[Settings](docs/screenshots/demo-settings.png)
-
-Independent project, not affiliated with Microsoft or Xbox. A valid game license
-is required. Launcher: [MIT license](LICENSE). The separate Nexus backend retains
-its upstream GPLv3 license and ships with corresponding source.
-The Nexus Runtime includes [FFmpeg](https://ffmpeg.org/) shared libraries under
-LGPL 2.1 or later; its corresponding pinned source and build recipe accompany
-each runtime release.
-[Contributing](CONTRIBUTING.md)
+MIT, like upstream. See [LICENSE](LICENSE).
